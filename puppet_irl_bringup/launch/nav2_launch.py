@@ -88,8 +88,8 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'autostart': True,
                 'node_names': [
-                    'map_server',
-                    'amcl',
+                   # 'map_server',
+                   # 'amcl',
                     'controller_server',
                     'planner_server',
                     'behavior_server',
