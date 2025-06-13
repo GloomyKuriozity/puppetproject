@@ -1,0 +1,9 @@
+<class_libraries>
+    <library path="reverse_shim_controller">
+        <class type="reverse_shim_controller::ReverseShimController" base_class_type="nav2_core::Controller">
+            <description>
+                reverse_shim_controller
+            </description>
+        </class>
+    </library>
+</class_libraries>
