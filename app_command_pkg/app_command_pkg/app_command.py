@@ -1,7 +1,7 @@
 '''
 Author: Mélanie Geulin
 
-Last Update: 15/10/2024
+Last Update: 04/12/2025
 
 Script: app_command
 
@@ -19,6 +19,14 @@ import time
 import subprocess
 import os
 from datetime import datetime
+
+# GPIO (with graceful fallback if not on a Raspberry Pi)
+try:
+    import RPi.GPIO as GPIO
+    GPIO_AVAILABLE = True
+except ImportError:
+    GPIO_AVAILABLE = False
+
 
 CMD_VEL_TIMEOUT = 1.0  # Timeout after which the robot stops if no command is received
 CMD_VEL_MIN_CHANGE = 0.05  # Minimum change in linear/angular values to publish
@@ -64,6 +72,22 @@ class AppCommandNode(Node):
         self.last_published_cmd_vel = (0.0, 0.0)  # (linear, angular)
         self.shutdown_flag = False  # Flag to signal shutdown
 
+                # GPIO setup for UP/DOWN control
+        self.gpio_available = GPIO_AVAILABLE
+        self.gpio_up_pin = 24
+        self.gpio_down_pin = 25
+        self.home_active = False
+        self.gpio_lock = threading.Lock()
+
+        if self.gpio_available:
+            GPIO.setwarnings(False)
+            GPIO.setmode(GPIO.BCM)
+            GPIO.setup(self.gpio_up_pin, GPIO.OUT, initial=GPIO.LOW)
+            GPIO.setup(self.gpio_down_pin, GPIO.OUT, initial=GPIO.LOW)
+            self.publish_log("GPIO initialized for UP/DOWN control (24=UP, 25=DOWN)")
+        else:
+            self.publish_log("GPIO library not available, UP/DOWN/HOME will be logged only.")
+
         # Separate thread for socket communication
         self.socket_thread = threading.Thread(target=self.socket_worker, daemon=True)
         self.socket_thread.start()
@@ -86,6 +110,64 @@ class AppCommandNode(Node):
 ####################
 
 #####OTHER FUNCTIONS#####
+        def _set_gpio_state(self, up: bool, down: bool):
+        """Set GPIO 24 (UP) and 25 (DOWN) in a mutually exclusive way."""
+        if not self.gpio_available:
+            self.publish_log(f"(Simulated) GPIO state -> UP={up}, DOWN={down}")
+            return
+
+        with self.gpio_lock:
+            # Enforce mutual exclusion
+            if up and down:
+                self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
+                up = False
+                down = False
+
+            GPIO.output(self.gpio_up_pin, GPIO.HIGH if up else GPIO.LOW)
+            GPIO.output(self.gpio_down_pin, GPIO.HIGH if down else GPIO.LOW)
+            self.publish_log(f"GPIO set: UP={up}, DOWN={down}")
+
+    def handle_up_command(self):
+        """Handle 'UP' command from tablet: UP=HIGH, DOWN=LOW, cancel HOME if active."""
+        if self.home_active:
+            self.publish_log("UP command received while HOME is active, ignoring.")
+            return
+
+        self.publish_log("Handling UP command (GPIO24 HIGH, GPIO25 LOW).")
+        self._set_gpio_state(up=True, down=False)
+
+    def handle_down_command(self):
+        """Handle 'DOWN' command from tablet: DOWN=HIGH, UP=LOW, cancel HOME if active."""
+        if self.home_active:
+            self.publish_log("DOWN command received while HOME is active, ignoring.")
+            return
+
+        self.publish_log("Handling DOWN command (GPIO25 HIGH, GPIO24 LOW).")
+        self._set_gpio_state(up=False, down=True)
+
+    def handle_home_command(self):
+        """
+        Handle 'HOME' command: maintain UP movement for 8s, then stop both.
+        During HOME, ignore manual UP/DOWN commands.
+        """
+        if self.home_active:
+            self.publish_log("HOME already in progress, ignoring new HOME command.")
+            return
+
+        self.publish_log("Handling HOME command: UP for 8 seconds, then stop.")
+        self.home_active = True
+
+        def home_sequence():
+            # Start UP
+            self._set_gpio_state(up=True, down=False)
+            time.sleep(8.0)
+            # Stop
+            self._set_gpio_state(up=False, down=False)
+            self.home_active = False
+            self.publish_log("HOME sequence completed, GPIO UP/DOWN set to LOW.")
+
+        threading.Thread(target=home_sequence, daemon=True).start()
+
     def socket_worker(self):
         """Separate thread to handle socket connections and data processing."""
         while rclpy.ok() and not self.shutdown_flag:
@@ -150,6 +232,12 @@ class AppCommandNode(Node):
                 self.send_pause_command()
             case "Continue Exploration":
                 self.send_continue_command()
+            case "UP":
+                self.handle_up_command()
+            case "DOWN":
+                self.handle_down_command()
+            case "HOME":
+                self.handle_home_command()
             case _ if ";" in data:
                 self.process_twist_command(data)
             case _:
@@ -273,6 +361,14 @@ class AppCommandNode(Node):
                 self.publish_log("Server socket closed.")
             except Exception as e:
                 self.get_logger().error(f"Error closing server socket: {e}")
+
+        if self.gpio_available:
+            try:
+                GPIO.cleanup()
+                self.publish_log("GPIO cleaned up.")
+            except Exception as e:
+                self.get_logger().error(f"Error during GPIO cleanup: {e}")
+
 #########################
 
 ####MAIN#####
