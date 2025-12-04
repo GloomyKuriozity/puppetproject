@@ -241,10 +241,26 @@ class AppCommandNode(Node):
                 self.handle_down_command()
             case "HOME":
                 self.handle_home_command()
+            case "STOP_PROBE":
+                self.handle_probe_stop_command()  # <-- add this
             case _ if ";" in data:
                 self.process_twist_command(data)
             case _:
                 self.publish_log(f"Unknown command: {data}")
+
+    def handle_probe_stop_command(self):
+        """
+        Stop probe motion immediately: both UP and DOWN GPIO low.
+        Also cancels HOME if it was running.
+        """
+        if self.home_active:
+            self.publish_log("STOP_PROBE received: cancelling HOME and stopping probe.")
+            self.home_active = False
+        else:
+            self.publish_log("STOP_PROBE received: stopping probe (UP/DOWN LOW).")
+
+        self._set_gpio_state(up=False, down=False)
+
 
     def send_pause_command(self):
         """Send a pause command to the robot."""
