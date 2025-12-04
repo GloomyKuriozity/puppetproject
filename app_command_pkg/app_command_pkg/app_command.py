@@ -66,21 +66,16 @@ class AppCommandNode(Node):
         self.last_published_cmd_vel = (0.0, 0.0)  # (linear, angular)
         self.shutdown_flag = False  # Flag to signal shutdown
 
-                # GPIO setup for UP/DOWN control
-        self.gpio_available = GPIO_AVAILABLE
+        # GPIO / probe control state (we use gpioset on gpiochip4)
         self.gpio_up_pin = 24
         self.gpio_down_pin = 25
         self.home_active = False
         self.gpio_lock = threading.Lock()
+        self.publish_log(
+            f"GPIO control using gpioset on {GPIO_CHIP} "
+            f"(UP={self.gpio_up_pin}, DOWN={self.gpio_down_pin})"
+        )
 
-        if self.gpio_available:
-            GPIO.setwarnings(False)
-            GPIO.setmode(GPIO.BCM)
-            GPIO.setup(self.gpio_up_pin, GPIO.OUT, initial=GPIO.LOW)
-            GPIO.setup(self.gpio_down_pin, GPIO.OUT, initial=GPIO.LOW)
-            self.publish_log("GPIO initialized for UP/DOWN control (24=UP, 25=DOWN)")
-        else:
-            self.publish_log("GPIO library not available, UP/DOWN/HOME will be logged only.")
 
         # Separate thread for socket communication
         self.socket_thread = threading.Thread(target=self.socket_worker, daemon=True)
@@ -369,13 +364,6 @@ class AppCommandNode(Node):
                 self.publish_log("Server socket closed.")
             except Exception as e:
                 self.get_logger().error(f"Error closing server socket: {e}")
-
-        if self.gpio_available:
-            try:
-                GPIO.cleanup()
-                self.publish_log("GPIO cleaned up.")
-            except Exception as e:
-                self.get_logger().error(f"Error during GPIO cleanup: {e}")
 
 #########################
 
