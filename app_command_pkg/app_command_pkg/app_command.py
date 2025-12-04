@@ -20,17 +20,11 @@ import subprocess
 import os
 from datetime import datetime
 
-# GPIO (with graceful fallback if not on a Raspberry Pi)
-try:
-    import RPi.GPIO as GPIO
-    GPIO_AVAILABLE = True
-except ImportError:
-    GPIO_AVAILABLE = False
-
-
 CMD_VEL_TIMEOUT = 1.0  # Timeout after which the robot stops if no command is received
 CMD_VEL_MIN_CHANGE = 0.05  # Minimum change in linear/angular values to publish
 HEARTBEAT_INTERVAL = 1.0  # Interval in seconds to expect/receive heartbeat
+
+GPIO_CHIP = "gpiochip4"
 
 user = os.getenv("USER")
 filename = datetime.now().strftime("map_%Y%m%d_%H%M%S")
@@ -110,23 +104,37 @@ class AppCommandNode(Node):
 ####################
 
 #####OTHER FUNCTIONS#####
-        def _set_gpio_state(self, up: bool, down: bool):
-        """Set GPIO 24 (UP) and 25 (DOWN) in a mutually exclusive way."""
-        if not self.gpio_available:
-            self.publish_log(f"(Simulated) GPIO state -> UP={up}, DOWN={down}")
-            return
-
+    def _set_gpio_state(self, up: bool, down: bool):
+        """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
         with self.gpio_lock:
-            # Enforce mutual exclusion
+            # Enforcer l'exclusion mutuelle
             if up and down:
                 self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
                 up = False
                 down = False
-
-            GPIO.output(self.gpio_up_pin, GPIO.HIGH if up else GPIO.LOW)
-            GPIO.output(self.gpio_down_pin, GPIO.HIGH if down else GPIO.LOW)
-            self.publish_log(f"GPIO set: UP={up}, DOWN={down}")
-
+    
+            self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
+    
+            # Construire les commandes gpioset
+            cmds = []
+    
+            # GPIO24 = UP
+            cmds.append([
+                "gpioset", "--mode=signal", GPIO_CHIP, f"24={'1' if up else '0'}"
+            ])
+    
+            # GPIO25 = DOWN
+            cmds.append([
+                "gpioset", "--mode=signal", GPIO_CHIP, f"25={'1' if down else '0'}"
+            ])
+    
+            for cmd in cmds:
+                try:
+                    subprocess.run(cmd, check=False)
+                    self.publish_log(f"Ran: {' '.join(cmd)}")
+                except Exception as e:
+                    self.publish_log(f"Error running {' '.join(cmd)}: {e}")
+                    
     def handle_up_command(self):
         """Handle 'UP' command from tablet: UP=HIGH, DOWN=LOW, cancel HOME if active."""
         if self.home_active:
