@@ -25,6 +25,7 @@ CMD_VEL_MIN_CHANGE = 0.05  # Minimum change in linear/angular values to publish
 HEARTBEAT_INTERVAL = 1.0  # Interval in seconds to expect/receive heartbeat
 
 GPIO_CHIP = "gpiochip4"
+GPIOSET_CMD = "/usr/bin/gpioset"  # adjust if `which gpioset` says something else
 
 user = os.getenv("USER")
 filename = datetime.now().strftime("map_%Y%m%d_%H%M%S")
@@ -107,28 +108,42 @@ class AppCommandNode(Node):
                 self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
                 up = False
                 down = False
-    
+
             self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
-    
-            # Construire les commandes gpioset
+
             cmds = []
-    
+
             # GPIO24 = UP
             cmds.append([
-                "gpioset", "--mode=signal", GPIO_CHIP, f"24={'1' if up else '0'}"
+                GPIOSET_CMD, "--mode=signal", GPIO_CHIP, f"24={'1' if up else '0'}"
             ])
-    
+
             # GPIO25 = DOWN
             cmds.append([
-                "gpioset", "--mode=signal", GPIO_CHIP, f"25={'1' if down else '0'}"
+                GPIOSET_CMD, "--mode=signal", GPIO_CHIP, f"25={'1' if down else '0'}"
             ])
-    
+
             for cmd in cmds:
                 try:
-                    subprocess.run(cmd, check=False)
-                    self.publish_log(f"Ran: {' '.join(cmd)}")
+                    # capture_output=True so we see stderr if it fails
+                    result = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True
+                    )
+                    if result.returncode != 0:
+                        self.publish_log(
+                            f"gpioset FAILED (rc={result.returncode}) "
+                            f"cmd={' '.join(cmd)} "
+                            f"stderr='{result.stderr.strip()}'"
+                        )
+                    else:
+                        self.publish_log(
+                            f"gpioset OK (rc=0) cmd={' '.join(cmd)}"
+                        )
                 except Exception as e:
                     self.publish_log(f"Error running {' '.join(cmd)}: {e}")
+
                     
     def handle_up_command(self):
         """Handle 'UP' command from tablet: UP=HIGH, DOWN=LOW, cancel HOME if active."""
@@ -159,15 +174,15 @@ class AppCommandNode(Node):
 
         self.publish_log("Handling HOME command: UP for 8 seconds, then stop.")
         self.home_active = True
-
-    def home_sequence():
-        # Start UP
-        self._set_gpio_state(up=True, down=False)
-        time.sleep(8.0)
-        # Stop
-        self._set_gpio_state(up=False, down=False)
-        self.home_active = False
-        self.publish_log("HOME sequence completed, GPIO UP/DOWN set to LOW.")
+    
+        def home_sequence():
+            # Start UP
+            self._set_gpio_state(up=True, down=False)
+            time.sleep(8.0)
+            # Stop
+            self._set_gpio_state(up=False, down=False)
+            self.home_active = False
+            self.publish_log("HOME sequence completed, GPIO UP/DOWN set to LOW.")
 
         threading.Thread(target=home_sequence, daemon=True).start()
 
