@@ -160,14 +160,14 @@ class AppCommandNode(Node):
         self.publish_log("Handling HOME command: UP for 8 seconds, then stop.")
         self.home_active = True
 
-        def home_sequence():
-            # Start UP
-            self._set_gpio_state(up=True, down=False)
-            time.sleep(8.0)
-            # Stop
-            self._set_gpio_state(up=False, down=False)
-            self.home_active = False
-            self.publish_log("HOME sequence completed, GPIO UP/DOWN set to LOW.")
+    def home_sequence():
+        # Start UP
+        self._set_gpio_state(up=True, down=False)
+        time.sleep(8.0)
+        # Stop
+        self._set_gpio_state(up=False, down=False)
+        self.home_active = False
+        self.publish_log("HOME sequence completed, GPIO UP/DOWN set to LOW.")
 
         threading.Thread(target=home_sequence, daemon=True).start()
 
