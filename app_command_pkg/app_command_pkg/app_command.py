@@ -101,48 +101,33 @@ class AppCommandNode(Node):
 
 #####OTHER FUNCTIONS#####
     def _set_gpio_state(self, up: bool, down: bool):
-        """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
-        with self.gpio_lock:
-            # Enforcer l'exclusion mutuelle
-            if up and down:
-                self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
-                up = False
-                down = False
+    """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
+    with self.gpio_lock:
+        if up and down:
+            self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
+            up = False
+            down = False
 
-            self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
+        self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
 
-            cmds = []
+        cmds = []
 
-            # GPIO24 = UP
-            cmds.append([
-                GPIOSET_CMD, "--mode=signal", GPIO_CHIP, f"24={'1' if up else '0'}"
-            ])
+        # GPIO24 = UP
+        cmds.append([
+            "gpioset", GPIO_CHIP, f"24={'1' if up else '0'}"
+        ])
 
-            # GPIO25 = DOWN
-            cmds.append([
-                GPIOSET_CMD, "--mode=signal", GPIO_CHIP, f"25={'1' if down else '0'}"
-            ])
+        # GPIO25 = DOWN
+        cmds.append([
+            "gpioset", GPIO_CHIP, f"25={'1' if down else '0'}"
+        ])
 
-            for cmd in cmds:
-                try:
-                    # capture_output=True so we see stderr if it fails
-                    result = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True
-                    )
-                    if result.returncode != 0:
-                        self.publish_log(
-                            f"gpioset FAILED (rc={result.returncode}) "
-                            f"cmd={' '.join(cmd)} "
-                            f"stderr='{result.stderr.strip()}'"
-                        )
-                    else:
-                        self.publish_log(
-                            f"gpioset OK (rc=0) cmd={' '.join(cmd)}"
-                        )
-                except Exception as e:
-                    self.publish_log(f"Error running {' '.join(cmd)}: {e}")
+        for cmd in cmds:
+            try:
+                subprocess.run(cmd, check=False)
+                self.publish_log(f"Ran: {' '.join(cmd)}")
+            except Exception as e:
+                self.publish_log(f"Error running {' '.join(cmd)}: {e}")
 
                     
     def handle_up_command(self):
