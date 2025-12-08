@@ -109,26 +109,29 @@ class AppCommandNode(Node):
     def on_contamination(self, msg: Float32MultiArray):
         """
         Forward contamination value to the tablet over TCP.
-        Probe publishes Float32MultiArray -> we pick one scalar (e.g. first element).
-        Format sent: DATA:CONTAM:<value>
+        msg.data = [alpha_cps, alpha_bq_cm2, beta_gamma_cps, beta_gamma_bq_cm2]
+        We choose beta_gamma_bq_cm2 as the value to send.
         """
         if not msg.data:
-            return  # nothing to send
-
-        # TODO: adjust what you consider the "main" contamination value:
-        # here we just take the first element
-        value = float(msg.data[0])
-
+            return
+    
+        try:
+            alpha_cps, alpha_bq_cm2, beta_gamma_cps, beta_gamma_bq_cm2 = msg.data
+        except ValueError:
+            # Unexpected length, just log and skip
+            self.get_logger().warn(f"Unexpected contamination array length: {len(msg.data)}")
+            return
+    
+        value = beta_gamma_bq_cm2   # pick what you want to display in the app
+    
         line = f"DATA:CONTAM:{value:.6f}\n"
-
+    
         if self.connected and self.client_socket:
             try:
                 self.client_socket.sendall(line.encode('utf-8'))
             except Exception as e:
                 self.get_logger().error(f"Error sending contamination data: {e}")
                 self.disconnect_client()
-
-
     
     def _set_gpio_state(self, up: bool, down: bool):
         """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
