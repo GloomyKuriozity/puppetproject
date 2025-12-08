@@ -12,7 +12,7 @@ import socket
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32
 import threading
 import select
 import time
@@ -54,6 +54,12 @@ class AppCommandNode(Node):
         self.cmd_vel_publisher = self.create_publisher(Twist, 'cmd_vel', 10)
         self.pause_request_publisher = self.create_publisher(String, 'pause_request', 10)
         self.log_publisher = self.create_publisher(String, 'app_command', 10)
+        self.contamination_sub = self.create_subscription(
+            Float32,
+            'contamination',          # change if your topic is named differently
+            self.on_contamination,
+            10
+        )
 
         # Initialize connection variables
         self.teleoperation_active = False
@@ -100,27 +106,44 @@ class AppCommandNode(Node):
 ####################
 
 #####OTHER FUNCTIONS#####
+    def on_contamination(self, msg: Float32):
+        """
+        Forward contamination value to the tablet over TCP.
+        Format: DATA:CONTAM:<value>
+        """
+        value = msg.data
+        line = f"DATA:CONTAM:{value:.6f}\n"
+
+        if self.connected and self.client_socket:
+            try:
+                self.client_socket.sendall(line.encode('utf-8'))
+                # don't spam logs each time, keep it quiet or log at low frequency
+            except Exception as e:
+                self.get_logger().error(f"Error sending contamination data: {e}")
+                self.disconnect_client()
+
+    
     def _set_gpio_state(self, up: bool, down: bool):
-    """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
-    with self.gpio_lock:
-        if up and down:
-            self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
-            up = False
-            down = False
-
-        self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
-
-        cmds = []
-
-        # GPIO24 = UP
-        cmds.append([
-            "gpioset", GPIO_CHIP, f"24={'1' if up else '0'}"
-        ])
-
-        # GPIO25 = DOWN
-        cmds.append([
-            "gpioset", GPIO_CHIP, f"25={'1' if down else '0'}"
-        ])
+        """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
+        with self.gpio_lock:
+            if up and down:
+                self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
+                up = False
+                down = False
+    
+            self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
+    
+            cmds = []
+    
+            # GPIO24 = UP
+            cmds.append([
+                "gpioset", GPIO_CHIP, f"24={'1' if up else '0'}"
+            ])
+    
+            # GPIO25 = DOWN
+            cmds.append([
+                "gpioset", GPIO_CHIP, f"25={'1' if down else '0'}"
+            ])
 
         for cmd in cmds:
             try:
