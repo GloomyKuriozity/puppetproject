@@ -56,7 +56,7 @@ class AppCommandNode(Node):
         self.log_publisher = self.create_publisher(String, 'app_command', 10)
         self.contamination_sub = self.create_subscription(
             Float32,
-            'contamination',          # change if your topic is named differently
+            'sfp100/contamination',          # change if your topic is named differently
             self.on_contamination,
             10
         )
