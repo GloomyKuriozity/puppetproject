@@ -12,7 +12,7 @@ import socket
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from std_msgs.msg import String, Float32
+from std_msgs.msg import String, Float32MultiArray, Float32
 import threading
 import select
 import time
