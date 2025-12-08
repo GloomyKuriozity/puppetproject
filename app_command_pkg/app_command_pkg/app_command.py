@@ -55,7 +55,7 @@ class AppCommandNode(Node):
         self.pause_request_publisher = self.create_publisher(String, 'pause_request', 10)
         self.log_publisher = self.create_publisher(String, 'app_command', 10)
         self.contamination_sub = self.create_subscription(
-            Float32,
+            Float32MultiArray,
             'sfp100/contamination',          # change if your topic is named differently
             self.on_contamination,
             10
@@ -106,21 +106,28 @@ class AppCommandNode(Node):
 ####################
 
 #####OTHER FUNCTIONS#####
-    def on_contamination(self, msg: Float32):
+    def on_contamination(self, msg: Float32MultiArray):
         """
         Forward contamination value to the tablet over TCP.
-        Format: DATA:CONTAM:<value>
+        Probe publishes Float32MultiArray -> we pick one scalar (e.g. first element).
+        Format sent: DATA:CONTAM:<value>
         """
-        value = msg.data
+        if not msg.data:
+            return  # nothing to send
+
+        # TODO: adjust what you consider the "main" contamination value:
+        # here we just take the first element
+        value = float(msg.data[0])
+
         line = f"DATA:CONTAM:{value:.6f}\n"
 
         if self.connected and self.client_socket:
             try:
                 self.client_socket.sendall(line.encode('utf-8'))
-                # don't spam logs each time, keep it quiet or log at low frequency
             except Exception as e:
                 self.get_logger().error(f"Error sending contamination data: {e}")
                 self.disconnect_client()
+
 
     
     def _set_gpio_state(self, up: bool, down: bool):
