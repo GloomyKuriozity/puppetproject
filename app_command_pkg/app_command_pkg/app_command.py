@@ -1,3 +1,4 @@
+  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                      app_command.py                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
 '''
 Author: Mélanie Geulin
 
@@ -18,6 +19,7 @@ import select
 import time
 import subprocess
 import os
+import gpiod
 from datetime import datetime
 
 CMD_VEL_TIMEOUT = 1.0  # Timeout after which the robot stops if no command is received
@@ -74,10 +76,23 @@ class AppCommandNode(Node):
         self.shutdown_flag = False  # Flag to signal shutdown
 
         # GPIO / probe control state (we use gpioset on gpiochip4)
+        self.start_time = time.time()
+        self.PROBE_ARM_DELAY_S = 2.0
         self.gpio_up_pin = 24
         self.gpio_down_pin = 25
         self.home_active = False
         self.gpio_lock = threading.Lock()
+        # Request both GPIO lines once and keep ownership (prevents float/glitches)
+        self.gpio_chip = gpiod.Chip(GPIO_CHIP)
+        self.gpio_up_line = self.gpio_chip.get_line(self.gpio_up_pin)
+        self.gpio_down_line = self.gpio_chip.get_line(self.gpio_down_pin)
+
+        self.gpio_up_line.request(consumer="app_command", type=gpiod.LINE_REQ_DIR_OUT, default_val=0)
+        self.gpio_down_line.request(consumer="app_command", type=gpiod.LINE_REQ_DIR_OUT, default_val=0)
+
+        # Force safe state at startup
+        self._set_gpio_state(up=False, down=False)
+
         self.publish_log(
             f"GPIO control using gpioset on {GPIO_CHIP} "
             f"(UP={self.gpio_up_pin}, DOWN={self.gpio_down_pin})"
@@ -89,7 +104,7 @@ class AppCommandNode(Node):
         self.socket_thread.start()
 
         # ROS timer to check for command timeout
-        self.HEARTBEAT_MESSAGE = "0 0 0 0 0 0"  # Message to send as heartbeat "InMissionState, N/A, N/A, N/A, N/A, N/A"
+        self.HEARTBEAT_MESSAGE = "0 0 0 0 0 0\n"  # Message to send as heartbeat "InMissionState, N/A, N/A, N/A, N/A, N/A"
         self.heartbeat_timer = self.create_timer(HEARTBEAT_INTERVAL, self.send_heartbeat)
 #########################
 
@@ -134,37 +149,28 @@ class AppCommandNode(Node):
                 self.disconnect_client()
     
     def _set_gpio_state(self, up: bool, down: bool):
-        """Set GPIO 24 (UP) and 25 (DOWN) using gpioset on gpiochip4, mutually exclusive."""
+        """Set GPIO 24 (UP) and 25 (DOWN) using persistent libgpiod lines."""
         with self.gpio_lock:
             if up and down:
                 self.publish_log("Requested UP and DOWN at the same time, forcing both LOW.")
                 up = False
                 down = False
-    
+
             self.publish_log(f"GPIO request: UP={up}, DOWN={down}")
-    
-            cmds = []
-    
-            # GPIO24 = UP
-            cmds.append([
-                "gpioset", GPIO_CHIP, f"24={'1' if up else '0'}"
-            ])
-    
-            # GPIO25 = DOWN
-            cmds.append([
-                "gpioset", GPIO_CHIP, f"25={'1' if down else '0'}"
-            ])
 
-        for cmd in cmds:
             try:
-                subprocess.run(cmd, check=False)
-                self.publish_log(f"Ran: {' '.join(cmd)}")
+                # Set both outputs. (Not truly atomic in libgpiod v1, but stable and non-floating.)
+                self.gpio_up_line.set_value(1 if up else 0)
+                self.gpio_down_line.set_value(1 if down else 0)
             except Exception as e:
-                self.publish_log(f"Error running {' '.join(cmd)}: {e}")
+                self.publish_log(f"Error setting GPIO via gpiod: {e}")
 
-                    
     def handle_up_command(self):
         """Handle 'UP' command from tablet: UP=HIGH, DOWN=LOW, cancel HOME if active."""
+        if time.time() - self.start_time < self.PROBE_ARM_DELAY_S:
+            self.publish_log("Probe command ignored during arming delay.")
+            return
+
         if self.home_active:
             self.publish_log("UP command received while HOME is active, ignoring.")
             return
@@ -174,6 +180,10 @@ class AppCommandNode(Node):
 
     def handle_down_command(self):
         """Handle 'DOWN' command from tablet: DOWN=HIGH, UP=LOW, cancel HOME if active."""
+        if time.time() - self.start_time < self.PROBE_ARM_DELAY_S:
+            self.publish_log("Probe command ignored during arming delay.")
+            return
+
         if self.home_active:
             self.publish_log("DOWN command received while HOME is active, ignoring.")
             return
@@ -186,6 +196,10 @@ class AppCommandNode(Node):
         Handle 'HOME' command: maintain UP movement for 8s, then stop both.
         During HOME, ignore manual UP/DOWN commands.
         """
+        if time.time() - self.start_time < self.PROBE_ARM_DELAY_S:
+            self.publish_log("Probe command ignored during arming delay.")
+            return
+
         if self.home_active:
             self.publish_log("HOME already in progress, ignoring new HOME command.")
             return
@@ -251,6 +265,8 @@ class AppCommandNode(Node):
                 self.client_socket.shutdown(socket.SHUT_RDWR)
                 self.client_socket.close()
                 self.publish_log("Client socket closed.")
+                self._set_gpio_state(up=False, down=False)
+                self.send_stop_command()
             except Exception as e:
                 self.get_logger().error(f"Error closing client socket: {e}")
         self.client_socket = None
@@ -308,7 +324,6 @@ class AppCommandNode(Node):
         msg.data = "Continue"
         self.pause_request_publisher.publish(msg)
         self.publish_log("Published Continue command")
-
     def start_exploration(self):
         """Handles starting the exploration process."""
         self.publish_log("Starting exploration process.")
@@ -414,6 +429,21 @@ class AppCommandNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Error closing server socket: {e}")
 
+        try:
+            self._set_gpio_state(up=False, down=False)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, "gpio_up_line"):
+                self.gpio_up_line.release()
+            if hasattr(self, "gpio_down_line"):
+                self.gpio_down_line.release()
+            if hasattr(self, "gpio_chip"):
+                self.gpio_chip.close()
+        except Exception as e:
+            self.get_logger().error(f"Error releasing GPIO: {e}")
+
 #########################
 
 ####MAIN#####
@@ -429,4 +459,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-#############

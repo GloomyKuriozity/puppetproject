@@ -180,6 +180,11 @@ protected:
   double control_duration_, simulate_ahead_time_;
   bool rotate_to_goal_heading_, in_rotation_, rotate_to_heading_once_;
 
+  bool did_rotate_once_for_this_goal_{false};
+  double rotate_once_big_angle_threshold_{M_PI / 2.0};  // or make it a param
+  double latched_angular_distance_to_heading_{0.0};
+  const double replan_angle_update_thresh = 0.35;  // radians
+
   // Dynamic parameters handler
   std::mutex mutex_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr dyn_params_handler_;

@@ -95,6 +95,7 @@ void ReverseShimController::configure(
       FootprintCollisionChecker<nav2_costmap_2d::Costmap2D *>>(costmap_ros->getCostmap());
 }
 
+
 void ReverseShimController::activate()
 {
   RCLCPP_INFO(
@@ -146,7 +147,34 @@ geometry_msgs::msg::TwistStamped ReverseShimController::computeVelocityCommands(
   const geometry_msgs::msg::Twist & velocity,
   nav2_core::GoalChecker * goal_checker)
 {
-  // Rotate to goal heading when in goal xy tolerance
+ if (in_rotation_) {
+    nav2_costmap_2d::Costmap2D * costmap = costmap_ros_->getCostmap();
+    std::unique_lock<nav2_costmap_2d::Costmap2D::mutex_t> lock(*(costmap->getMutex()));
+    std::lock_guard<std::mutex> lock_reinit(mutex_);
+
+    try {
+      geometry_msgs::msg::Pose sampled_pt_base = transformPoseToBaseFrame(getSampledPathPt());
+      const double candidate =
+        std::atan2(-sampled_pt_base.position.y, -sampled_pt_base.position.x);
+
+      const double delta =
+        angles::shortest_angular_distance(latched_angular_distance_to_heading_, candidate);
+
+      if (std::fabs(delta) > replan_angle_update_thresh) {
+        latched_angular_distance_to_heading_ = candidate;
+      }
+    } catch (...) {
+      // keep last latch
+    }
+
+    if (std::fabs(latched_angular_distance_to_heading_) > angular_disengage_threshold_) {
+      return computeRotateToHeadingCommand(latched_angular_distance_to_heading_, pose, velocity);
+    }
+
+    in_rotation_ = false;
+  }
+
+
   if (rotate_to_goal_heading_) {
     std::lock_guard<std::mutex> lock_reinit(mutex_);
 
@@ -187,24 +215,21 @@ geometry_msgs::msg::TwistStamped ReverseShimController::computeVelocityCommands(
 
     std::lock_guard<std::mutex> lock_reinit(mutex_);
     try {
+      path_updated_ = false;
+
       geometry_msgs::msg::Pose sampled_pt_base = transformPoseToBaseFrame(getSampledPathPt());
 
       double angular_distance_to_heading =
         std::atan2(-sampled_pt_base.position.y, -sampled_pt_base.position.x);
 
-      double angular_thresh =
-        in_rotation_ ? angular_disengage_threshold_ : angular_dist_threshold_;
-      if (abs(angular_distance_to_heading) > angular_thresh) {
-        RCLCPP_INFO(
-          logger_,
-          "Robot is not within the new path's rough *backward* heading, rotating to *backward* heading... %f", angular_distance_to_heading);
+      if (rotate_to_heading_once_ &&
+          !did_rotate_once_for_this_goal_ &&
+          std::fabs(angular_distance_to_heading) > rotate_once_big_angle_threshold_)
+      {
+        did_rotate_once_for_this_goal_ = true;
         in_rotation_ = true;
-        return computeRotateToHeadingCommand(angular_distance_to_heading, pose, velocity);
-      } else {
-        RCLCPP_DEBUG(
-          logger_,
-          "Robot is at the new path's rough *backward* heading, passing to controller");
-        path_updated_ = false;
+        latched_angular_distance_to_heading_ = angular_distance_to_heading;
+        return computeRotateToHeadingCommand(latched_angular_distance_to_heading_, pose, velocity);
       }
     } catch (const std::runtime_error & e) {
       RCLCPP_DEBUG(
@@ -217,7 +242,6 @@ geometry_msgs::msg::TwistStamped ReverseShimController::computeVelocityCommands(
   }
 
   // If at this point, use the primary controller to path track
-  in_rotation_ = false;
   return primary_controller_->computeVelocityCommands(pose, velocity, goal_checker);
 }
 
@@ -300,15 +324,15 @@ void ReverseShimController::isCollisionFree(
   double initial_yaw = tf2::getYaw(pose.pose.orientation);
   double yaw = 0.0;
   double footprint_cost = 0.0;
-  double remaining_rotation_before_thresh =
-    fabs(angular_distance_to_heading) - angular_dist_threshold_;
+  double remaining_rotation_before_thresh = std::max(0.0, std::fabs(angular_distance_to_heading) - angular_dist_threshold_);
 
   while (simulated_time < simulate_ahead_time_) {
     simulated_time += control_duration_;
     yaw = initial_yaw + cmd_vel.twist.angular.z * simulated_time;
 
-    // Stop simulating past the point it would be passed onto the primary controller
-    if (angles::shortest_angular_distance(yaw, initial_yaw) >= remaining_rotation_before_thresh) {
+    const double rotated =
+      std::fabs(angles::shortest_angular_distance(initial_yaw, yaw));
+    if (rotated >= remaining_rotation_before_thresh) {
       break;
     }
 
@@ -332,21 +356,23 @@ void ReverseShimController::isCollisionFree(
 
 bool ReverseShimController::isGoalChanged(const nav_msgs::msg::Path & path)
 {
-  // Return true if rotating or if the current path is empty
-  if (in_rotation_ || current_path_.poses.empty()) {
+  if (current_path_.poses.empty() || path.poses.empty()) {
     return true;
   }
-
-  // Check if the last pose of the current and new paths differ
   return current_path_.poses.back().pose != path.poses.back().pose;
 }
 
 void ReverseShimController::setPlan(const nav_msgs::msg::Path & path)
 {
-  path_updated_ = rotate_to_heading_once_ ? isGoalChanged(path) : true;
+  if (rotate_to_heading_once_ && isGoalChanged(path)) {
+    did_rotate_once_for_this_goal_ = false;
+  }
+
+  path_updated_ = true;
   current_path_ = path;
   primary_controller_->setPlan(path);
 }
+
 
 void ReverseShimController::setSpeedLimit(const double & speed_limit, const bool & percentage)
 {
@@ -394,3 +420,4 @@ ReverseShimController::dynamicParametersCallback(std::vector<rclcpp::Parameter> 
 PLUGINLIB_EXPORT_CLASS(
   reverse_shim_controller::ReverseShimController,
   nav2_core::Controller)
+

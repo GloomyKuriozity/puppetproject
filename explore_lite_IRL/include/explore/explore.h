@@ -1,4 +1,4 @@
-********************************************************************
+/*********************************************************************
  *
  * Software License Agreement (BSD License)
  *
@@ -109,7 +109,7 @@ private:
 
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
       marker_array_publisher_;
-  rclcpp::Logger logger_ = rclcpp::get_logger("ExploreNode");
+  rclcpp::Logger logger_;
   tf2_ros::Buffer tf_buffer_;
   tf2_ros::TransformListener tf_listener_;
 
@@ -131,6 +131,12 @@ private:
 
   geometry_msgs::msg::Pose initial_pose_;
   void returnToInitialPose(void);
+
+  // Stop / cancel robustness
+  std::atomic_bool stopping_{false};
+  rclcpp::TimerBase::SharedPtr cancel_timer_;
+  int cancel_tries_{0};
+  int cancel_tries_max_{10};  // e.g. 10 * 100ms = 1s total
 
   // parameters
   double planner_frequency_;

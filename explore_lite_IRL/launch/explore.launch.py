@@ -12,7 +12,7 @@ from launch.actions import LogInfo
 def generate_launch_description():
     ld = LaunchDescription()
     config = os.path.join(
-        get_package_share_directory("explore_lite_IRL"), "config", "params.yaml"
+        get_package_share_directory("explore_lite_IRL"), "config", "params_costmap.yaml"
     )
     use_sim_time = LaunchConfiguration("use_sim_time")
     namespace = LaunchConfiguration("namespace")

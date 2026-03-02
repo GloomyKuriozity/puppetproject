@@ -30,13 +30,13 @@ def generate_launch_description():
             ),
             description='Full path to the Nav2 parameters file'
         ),
-        Node(
-            package='nav2_amcl',
-            executable='amcl',
-            name='amcl',
-            output='screen',
-            parameters=[params_file]
-        ),
+#        Node(
+#            package='nav2_amcl',
+#            executable='amcl',
+#            name='amcl',
+#            output='screen',
+#           parameters=[params_file]
+#        ),
         Node(
             package='nav2_controller',
             executable='controller_server',
@@ -72,13 +72,25 @@ def generate_launch_description():
             output='screen',
             parameters=[params_file]
         ),
+ #       Node(
+ #           package='nav2_map_server',
+ #           executable='map_server',
+ #           name='map_server',
+ #           output='screen',
+ #           parameters=[{'yaml_filename': map_yaml_file}, params_file]
+ #       ),
         Node(
-            package='nav2_map_server',
-            executable='map_server',
-            name='map_server',
+            package='nav2_velocity_smoother',
+            executable='velocity_smoother',
+            name='velocity_smoother',
             output='screen',
-            parameters=[{'yaml_filename': map_yaml_file}, params_file]
+            parameters=[params_file],
+            remappings=[
+                ('cmd_vel', '/cmd_vel'),       
+                ('cmd_vel_smoothed', '/cmd_vel')      
+            ]
         ),
+
         Node(
             package='nav2_lifecycle_manager',
             executable='lifecycle_manager',
@@ -88,15 +100,14 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'autostart': True,
                 'node_names': [
-                   # 'map_server',
-                   # 'amcl',
-                    'controller_server',
-                    'planner_server',
-                    'behavior_server',
-                    'bt_navigator',
-                    'waypoint_follower'
-                ]
+                'controller_server',
+                'planner_server',
+                'behavior_server',
+                'bt_navigator',
+                'waypoint_follower',
+                'velocity_smoother',
+            ]
+
             }]
         )
     ])
-

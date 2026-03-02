@@ -9,8 +9,7 @@ namespace frontier_exploration
  * @brief Represents a frontier
  *
  */
-
- struct Frontier {
+struct Frontier {
   std::uint32_t size;
   double min_distance;
   double cost;
@@ -27,16 +26,14 @@ namespace frontier_exploration
 class FrontierSearch
 {
 public:
-  FrontierSearch()
-  {
-  }
+  FrontierSearch() : logger_(rclcpp::get_logger("frontier_search")) {} // Default constructor for the logger
 
   /**
    * @brief Constructor for search task
    * @param costmap Reference to costmap data to search.
    */
   FrontierSearch(nav2_costmap_2d::Costmap2D* costmap, double potential_scale,
-                 double gain_scale, double min_frontier_size);
+                 double gain_scale, double min_frontier_size, rclcpp::Logger logger);
 
   /**
    * @brief Runs search implementation, outward from the start position
@@ -84,6 +81,7 @@ private:
   unsigned int size_x_, size_y_;
   double potential_scale_, gain_scale_;
   double min_frontier_size_;
+  rclcpp::Logger logger_;
 };
 }  // namespace frontier_exploration
 #endif

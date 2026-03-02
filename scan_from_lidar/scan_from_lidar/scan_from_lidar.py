@@ -23,7 +23,7 @@ from rclpy.qos import QoSProfile
 
 MAX_BUFFER_SIZE = 100000
 MAX_BACKOFF_TIME = 32
-TIMER_PERIOD = 0.05  # 1 / 15
+TIMER_PERIOD = 0.067 #15Hz
 SOCKET_TIMEOUT = 0.5
 MAX_RETRY_TIME = 5
 READ_TIMEOUT = 2
@@ -167,8 +167,8 @@ class LidarPublisher(Node):
                 scan.angle_min = start_angle
                 scan.angle_max = start_angle + angular_res * (len(distances) - 1)
                 scan.angle_increment = angular_res
-                scan.time_increment = 0.1 / len(distances)  # Time between measurements
-                scan.scan_time = 0.1  # Total scan time
+                scan.time_increment = 0.0  # Time between measurements
+                scan.scan_time = 0.0  # Total scan time
                 scan.range_min = 0.05  # Minimum range
                 scan.range_max = 25.0  # Maximum range
 
@@ -230,12 +230,15 @@ class LidarPublisher(Node):
             # Start angle is at index 23, angular step is at 24 (adjust if needed based on your telegram format)
             start_angle_raw = parts[23]
             angular_step_raw = parts[24]
-            start_angle = int(start_angle_raw, 16) / 10000.0  # now in degrees
+            start_angle = self.hex_to_signed_int(start_angle_raw) / 10000.  # now in degrees
             angular_step = int(angular_step_raw, 16) / 10000.0  # in degrees
 
             # Convert to radians
             start_angle_rad = math.radians(start_angle)
             angular_step_rad = math.radians(angular_step)
+
+            ANGLE_OFFSET = -math.pi / 2   # try -90° first
+            start_angle_rad += ANGLE_OFFSET 
 
             return distances, start_angle_rad, angular_step_rad
 
@@ -248,6 +251,11 @@ class LidarPublisher(Node):
         angles = np.linspace(start_angle, start_angle + angular_resolution * (num_measurements - 1), num_measurements)
         return list(zip(angles, distances))
 
+    def hex_to_signed_int(self, hex_str):
+        val = int(hex_str, 16)
+        if val & (1 << 31):  # if sign bit set (32-bit)
+            val -= 1 << 32
+        return val
 #########################
 
 #####MAIN#####
@@ -277,3 +285,5 @@ def signal_handler(sig, frame, node):
 
 if __name__ == '__main__':
     main()
+##############
+

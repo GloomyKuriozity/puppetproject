@@ -26,14 +26,16 @@ class StaticFramePublisher(Node):
         static_transform_stamped.header.frame_id = "base_link"
         static_transform_stamped.child_frame_id = "base_scan"
 
-        # Set the translation and rotation for the static transform
-        static_transform_stamped.transform.translation.x = -0.315
+        static_transform_stamped.transform.translation.x = -0.310
         static_transform_stamped.transform.translation.y = 0.0
-        static_transform_stamped.transform.translation.z = 0.25
+        static_transform_stamped.transform.translation.z = 0.33
+
+        # Laser faces backward
+        yaw = math.pi
         static_transform_stamped.transform.rotation.x = 0.0
         static_transform_stamped.transform.rotation.y = 0.0
-        static_transform_stamped.transform.rotation.z = 1.0
-        static_transform_stamped.transform.rotation.w = 0.0
+        static_transform_stamped.transform.rotation.z = math.sin(yaw / 2.0)
+        static_transform_stamped.transform.rotation.w = math.cos(yaw / 2.0)
 
         # Publish the static transform
         self.static_broadcaster.sendTransform(static_transform_stamped)

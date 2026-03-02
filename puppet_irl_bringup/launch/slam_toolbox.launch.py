@@ -46,7 +46,8 @@ def generate_launch_description():
           slam_params_file,
           {
             'use_lifecycle_manager': use_lifecycle_manager,
-            'use_sim_time': use_sim_time
+            'use_sim_time': use_sim_time,
+            'max_subscriber_queue_size': 100
           }
         ],
         package='slam_toolbox',
@@ -100,5 +101,3 @@ def generate_launch_description():
     ld.add_action(delayed_activate_event)
 
     return ld
-
-#slam_params_file = "/home/kuriozity/ros2_ws/src/puppet_v2_pkg/config/mapper_params_online_async.yaml"

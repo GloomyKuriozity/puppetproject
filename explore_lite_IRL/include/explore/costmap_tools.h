@@ -133,4 +133,3 @@ bool nearestCell(unsigned int& result, unsigned int start, unsigned char val,
 }
 }  // namespace frontier_exploration
 #endif
-
