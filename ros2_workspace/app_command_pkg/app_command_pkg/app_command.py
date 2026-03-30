@@ -122,25 +122,23 @@ class AppCommandNode(Node):
 
 #####OTHER FUNCTIONS#####
     def on_contamination(self, msg: Float32MultiArray):
-        """
-        Forward contamination value to the tablet over TCP.
-        msg.data = [alpha_cps, alpha_bq_cm2, beta_gamma_cps, beta_gamma_bq_cm2]
-        We choose beta_gamma_bq_cm2 as the value to send.
-        """
         if not msg.data:
             return
-    
+
         try:
             alpha_cps, alpha_bq_cm2, beta_gamma_cps, beta_gamma_bq_cm2 = msg.data
         except ValueError:
-            # Unexpected length, just log and skip
             self.get_logger().warn(f"Unexpected contamination array length: {len(msg.data)}")
             return
-    
-        value = beta_gamma_bq_cm2   # pick what you want to display in the app
-    
-        line = f"DATA:CONTAM:{value:.6f}\n"
-    
+
+        line = (
+            f"DATA:CONTAM:"
+            f"{alpha_cps:.6f};"
+            f"{alpha_bq_cm2:.6f};"
+            f"{beta_gamma_cps:.6f};"
+            f"{beta_gamma_bq_cm2:.6f}\n"
+        )
+
         if self.connected and self.client_socket:
             try:
                 self.client_socket.sendall(line.encode('utf-8'))
@@ -310,7 +308,6 @@ class AppCommandNode(Node):
 
         self._set_gpio_state(up=False, down=False)
 
-
     def send_pause_command(self):
         """Send a pause command to the robot."""
         msg = String()
@@ -324,6 +321,7 @@ class AppCommandNode(Node):
         msg.data = "Continue"
         self.pause_request_publisher.publish(msg)
         self.publish_log("Published Continue command")
+    
     def start_exploration(self):
         """Handles starting the exploration process."""
         self.publish_log("Starting exploration process.")
