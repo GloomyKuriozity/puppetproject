@@ -6,20 +6,36 @@
 #define I2C_SLAVE_ADDRESS 0x22
 #define CAN_CS_PIN 53
 
-const uint32_t CAN_ID_ODOM                    = 0x81E101B3;
 static const float WHEEL_BASE_M = 0.550f;
 
-MCP_CAN CAN(CAN_CS_PIN);
-
-// State
+volatile float battery_voltage = NAN;
 volatile float x = 0.0f, y = 0.0f, theta = 0.0f;
 volatile float linear_velocity = 0.0f, angular_velocity = 0.0f;
 
-int32_t prev_left_mm = 0, prev_right_mm = 0;
-bool have_prev = false;
-uint32_t prevTime = 0;
+volatile uint32_t last_battery_update_ms = 0;
 
-volatile uint32_t last_heartbeat = 0;
+const uint32_t CAN_ID_ODOM = 0x81E101B3;
+const uint32_t CAN_ID_STATUS = 0x81E101B1;
+
+uint32_t prevTime = 0;
+uint32_t lastPrintMs = 0;
+
+int32_t prev_left_mm = 0, prev_right_mm = 0;
+
+bool have_prev = false;
+
+MCP_CAN CAN(CAN_CS_PIN);
+
+struct TelemetryPayload {
+  float x;
+  float y;
+  float theta;
+  float linear_velocity;
+  float angular_velocity;
+  float battery_voltage;
+};
+
+volatile TelemetryPayload telemetry = {0};
 
 void setup()
 {
@@ -35,28 +51,35 @@ void setup()
   prevTime = millis();
 }
 
-uint32_t lastPrintMs = 0;
-
 void loop()
 {
   while (CAN.checkReceive() == CAN_MSGAVAIL) {
     unsigned long canId=0; uint8_t len=0; uint8_t buf[8];
     if (CAN.readMsgBuf(&canId, &len, buf) != CAN_OK) continue;
 
-    // Example: print at most every 50 ms
     uint32_t now = millis();
     if (now - lastPrintMs >= 50) {
       dumpRX(canId, len, buf);
       lastPrintMs = now;
     }
 
-    // odom integration remains unthrottled
     if (len == 8 && ((canId & 0x1FFFFFFFul) == (CAN_ID_ODOM & 0x1FFFFFFFul))) {
       updateOdometry(read_i32_le(&buf[0]), read_i32_le(&buf[4]));
     }
+
+    if (len >= 4 && ((canId & 0x1FFFFFFFul) == (CAN_ID_STATUS & 0x1FFFFFFFul))) {
+      updateBatteryVoltage(buf);
+    }
   }
+  updateTelemetrySnapshot();
 }
 
+void updateBatteryVoltage(const uint8_t *buf)
+{
+  const uint16_t decivolts = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+  battery_voltage = decivolts * 0.1f;   // protocol unit = 0.1 V
+  last_battery_update_ms = millis();
+}
 
 static inline int32_t read_i32_le(const uint8_t *p)
 {
@@ -64,6 +87,18 @@ static inline int32_t read_i32_le(const uint8_t *p)
          ((int32_t)p[1] << 8) |
          ((int32_t)p[2] << 16) |
          ((int32_t)p[3] << 24);
+}
+
+void updateTelemetrySnapshot()
+{
+  noInterrupts();
+  telemetry.x = x;
+  telemetry.y = y;
+  telemetry.theta = theta;
+  telemetry.linear_velocity = linear_velocity;
+  telemetry.angular_velocity = angular_velocity;
+  telemetry.battery_voltage = battery_voltage;
+  interrupts();
 }
 
 void dumpRX(unsigned long id, uint8_t len, uint8_t* buf)
@@ -81,12 +116,7 @@ void dumpRX(unsigned long id, uint8_t len, uint8_t* buf)
 
 void onI2CRequest()
 {
-  // 5 floats = 20 bytes (fits Wire buffer)
-  Wire.write((uint8_t*)&x, sizeof(x));
-  Wire.write((uint8_t*)&y, sizeof(y));
-  Wire.write((uint8_t*)&theta, sizeof(theta));
-  Wire.write((uint8_t*)&linear_velocity, sizeof(linear_velocity));
-  Wire.write((uint8_t*)&angular_velocity, sizeof(angular_velocity));
+  Wire.write((const uint8_t*)&telemetry, sizeof(telemetry));
 }
 
 void sendCAN(MCP_CAN& can, uint32_t id, uint8_t* data, uint8_t len) {
@@ -139,39 +169,14 @@ void updateOdometry(int32_t left_mm, int32_t right_mm)
   const float ds = 0.5f * (dL + dR);
   const float dtheta = (dR - dL) / WHEEL_BASE_M;
 
-  // Midpoint integration
   const float theta_mid = theta + 0.5f * dtheta;
   x += ds * cosf(theta_mid);
   y += ds * sinf(theta_mid);
   theta += dtheta;
 
-  // Wrap
   if (theta > (float)M_PI) theta -= 2.0f * (float)M_PI;
   if (theta < -(float)M_PI) theta += 2.0f * (float)M_PI;
 
   linear_velocity = ds / dt;
   angular_velocity = dtheta / dt;
-}
-
-void receiveCANMessage(MCP_CAN& CAN) {
-  unsigned long canId = 0;
-  unsigned char len = 0;
-  unsigned char buf[8] = {0};  // IMPORTANT: clear buffer
-
-  if (CAN.checkReceive() != CAN_MSGAVAIL) return;
-
-  if (CAN.readMsgBuf(&canId, &len, buf) != CAN_OK) return;
-
-  Serial.print("RX id=0x");
-  Serial.print(canId, HEX);
-  Serial.print(" len=");
-  Serial.print(len);
-  Serial.print(" data={ ");
-
-  for (uint8_t i = 0; i < len; i++) {   // IMPORTANT: only len bytes
-    if (buf[i] < 16) Serial.print('0');
-    Serial.print(buf[i], HEX);
-    Serial.print(' ');
-  }
-  Serial.println("}");
 }
