@@ -62,6 +62,17 @@ class AppCommandNode(Node):
             self.on_contamination,
             10
         )
+        self.robot_info_sub = self.create_subscription(
+            String,
+            'robot_info',
+            self.on_robot_info,
+            10
+        )
+
+        self.latest_battery_voltage = None
+        self.latest_battery_percentage = None
+        self.latest_battery_low_warning = 0
+        self.latest_battery_critical_warning = 0
 
         # Initialize connection variables
         self.teleoperation_active = False
@@ -104,23 +115,63 @@ class AppCommandNode(Node):
         self.socket_thread.start()
 
         # ROS timer to check for command timeout
-        self.HEARTBEAT_MESSAGE = "0 0 0 0 0 0\n"  # Message to send as heartbeat "InMissionState, N/A, N/A, N/A, N/A, N/A"
+        self.robot_state = 0
         self.heartbeat_timer = self.create_timer(HEARTBEAT_INTERVAL, self.send_heartbeat)
 #########################
 
 #####CALLBACKS######
     def send_heartbeat(self):
-        """Send a heartbeat message to the client to indicate the server (robot) is alive and which state."""
+        """
+        Send a heartbeat message to the client.
+        Format:
+        <state> <battery_voltage> <battery_percentage> <low_warning> <critical_warning>\n
+        """
         if self.connected and self.client_socket:
             try:
-                self.client_socket.sendall(self.HEARTBEAT_MESSAGE.encode('utf-8'))
-                self.get_logger().info("Sent heartbeat to client.")
+                voltage_str = "unknown" if self.latest_battery_voltage is None else f"{self.latest_battery_voltage:.2f}"
+                percentage_str = "unknown" if self.latest_battery_percentage is None else f"{self.latest_battery_percentage:.1f}"
+
+                heartbeat_message = (
+                    f"{self.robot_state} "
+                    f"{voltage_str} "
+                    f"{percentage_str} "
+                    f"{self.latest_battery_low_warning} "
+                    f"{self.latest_battery_critical_warning}\n"
+                )
+
+                self.client_socket.sendall(heartbeat_message.encode('utf-8'))
+                self.get_logger().info(f"Sent heartbeat to client: {heartbeat_message.strip()}")
+
             except socket.error as e:
                 self.get_logger().error(f"Error sending heartbeat: {e}")
-               # self.disconnect_client()
-####################
+                self.disconnect_client()
 
-#####OTHER FUNCTIONS#####
+    def on_robot_info(self, msg: String):
+        """
+        Cache latest battery info coming from robot_control.
+        Expected format:
+        battery_voltage=24.10;battery_percentage=73.8;low_warning=0;critical_warning=0
+        """
+        try:
+            fields = {}
+            for item in msg.data.split(';'):
+                if '=' in item:
+                    key, value = item.split('=', 1)
+                    fields[key.strip()] = value.strip()
+
+            voltage_str = fields.get("battery_voltage", "unknown")
+            percentage_str = fields.get("battery_percentage", "unknown")
+            low_warning_str = fields.get("low_warning", "0")
+            critical_warning_str = fields.get("critical_warning", "0")
+
+            self.latest_battery_voltage = None if voltage_str == "unknown" else float(voltage_str)
+            self.latest_battery_percentage = None if percentage_str == "unknown" else float(percentage_str)
+            self.latest_battery_low_warning = int(low_warning_str)
+            self.latest_battery_critical_warning = int(critical_warning_str)
+
+        except Exception as e:
+            self.get_logger().error(f"Error processing robot_info: {e}")               
+
     def on_contamination(self, msg: Float32MultiArray):
         if not msg.data:
             return
@@ -146,6 +197,10 @@ class AppCommandNode(Node):
                 self.get_logger().error(f"Error sending contamination data: {e}")
                 self.disconnect_client()
     
+####################
+
+#####OTHER FUNCTIONS#####
+
     def _set_gpio_state(self, up: bool, down: bool):
         """Set GPIO 24 (UP) and 25 (DOWN) using persistent libgpiod lines."""
         with self.gpio_lock:
@@ -269,6 +324,7 @@ class AppCommandNode(Node):
                 self.get_logger().error(f"Error closing client socket: {e}")
         self.client_socket = None
         self.connected = False  # Properly reset the connected flag
+        self.connected = False
 
     def process_data(self, data):
         """Process incoming data, match known commands, and log actions."""
@@ -336,7 +392,7 @@ class AppCommandNode(Node):
             self.send_stop_command()
             self.publish_log("Started flipper_exploration.")
 
-            self.HEARTBEAT_MESSAGE = "1 0 0 0 0 0"
+            self.robot_state = 1
             self.publish_log("Started cartographer.launch.py.")
 
         except Exception as e:
@@ -351,7 +407,7 @@ class AppCommandNode(Node):
             # Kill the naviguation and exploration nodes
             subprocess.run(['pkill', 'f', 'explore'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             subprocess.run(['pkill', 'f', 'nav2'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
+            self.robot_state = 0
             self.publish_log("Successfully killed slam node, naviguation node and exploration node.")
 
         except Exception as e:
