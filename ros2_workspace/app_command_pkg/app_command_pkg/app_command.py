@@ -1,6 +1,4 @@
-  GNU nano 7.2                                                                                                                                                                                                                                                                                                                                                                                                                                                                      app_command.py                                                                                                                                                                                                                                                                                                                                                                                                                                                                                
-'''
-Author: Mélanie Geulin
+'''Author: Mélanie Geulin
 
 Last Update: 04/12/2025
 
@@ -20,6 +18,7 @@ import time
 import subprocess
 import os
 import gpiod
+import json
 from datetime import datetime
 
 CMD_VEL_TIMEOUT = 1.0  # Timeout after which the robot stops if no command is received
@@ -29,9 +28,14 @@ HEARTBEAT_INTERVAL = 1.0  # Interval in seconds to expect/receive heartbeat
 GPIO_CHIP = "gpiochip4"
 GPIOSET_CMD = "/usr/bin/gpioset"  # adjust if `which gpioset` says something else
 
+ROBOT_WAITING = "WAITING"
+ROBOT_WORKING = "WORKING"
+ROBOT_PAUSED = "PAUSED"
+ROBOT_MAPPING = "MAPPING"
+ROBOT_CHARGING = "CHARGING"
+ROBOT_ERROR = "ERROR"
+
 user = os.getenv("USER")
-filename = datetime.now().strftime("map_%Y%m%d_%H%M%S")
-path = f"/home/{user}/ros2_ws/maps_library/{filename}"
 
 class AppCommandNode(Node):
 #####INITIALIZATION######
@@ -109,13 +113,16 @@ class AppCommandNode(Node):
             f"(UP={self.gpio_up_pin}, DOWN={self.gpio_down_pin})"
         )
 
-
         # Separate thread for socket communication
         self.socket_thread = threading.Thread(target=self.socket_worker, daemon=True)
         self.socket_thread.start()
 
+        self.current_mapping_job = None
+        self.jobs_root = f"/home/{user}/ros2_ws/mapping_jobs"
+        os.makedirs(self.jobs_root, exist_ok=True)
+
         # ROS timer to check for command timeout
-        self.robot_state = 0
+        self.robot_state = ROBOT_WAITING
         self.heartbeat_timer = self.create_timer(HEARTBEAT_INTERVAL, self.send_heartbeat)
 #########################
 
@@ -132,11 +139,12 @@ class AppCommandNode(Node):
                 percentage_str = "unknown" if self.latest_battery_percentage is None else f"{self.latest_battery_percentage:.1f}"
 
                 heartbeat_message = (
-                    f"{self.robot_state} "
-                    f"{voltage_str} "
-                    f"{percentage_str} "
-                    f"{self.latest_battery_low_warning} "
-                    f"{self.latest_battery_critical_warning}\n"
+                    f"HEARTBEAT:"
+                    f"state={self.robot_state};"
+                    f"battery_voltage={voltage_str};"
+                    f"battery_percentage={percentage_str};"
+                    f"low_warning={self.latest_battery_low_warning};"
+                    f"critical_warning={self.latest_battery_critical_warning}\n"
                 )
 
                 self.client_socket.sendall(heartbeat_message.encode('utf-8'))
@@ -196,11 +204,9 @@ class AppCommandNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Error sending contamination data: {e}")
                 self.disconnect_client()
-    
 ####################
 
 #####OTHER FUNCTIONS#####
-
     def _set_gpio_state(self, up: bool, down: bool):
         """Set GPIO 24 (UP) and 25 (DOWN) using persistent libgpiod lines."""
         with self.gpio_lock:
@@ -330,10 +336,14 @@ class AppCommandNode(Node):
         """Process incoming data, match known commands, and log actions."""
         self.publish_log(f"Processing data: {data}")
         match data:
-            case "Start Exploration":
-                self.start_exploration()
-            case "Stop Exploration":
-                self.stop_exploration()
+            case "MAP_START":
+                self.start_mapping()
+            case "MAP_STOP_DISCARD":
+                self.stop_mapping_discard()
+            case "MAP_STOP_SAVE_TEMP":
+                self.stop_mapping_save_temp()
+            case _ if data.startswith("MAP_SAVE_FINAL:"):
+                self.save_mapping_final(data)
             case "Pause Robot":
                 self.send_pause_command()
             case "Continue Exploration":
@@ -378,59 +388,103 @@ class AppCommandNode(Node):
         self.pause_request_publisher.publish(msg)
         self.publish_log("Published Continue command")
     
-    def start_exploration(self):
-        """Handles starting the exploration process."""
-        self.publish_log("Starting exploration process.")
+    def start_mapping(self):
+        if self.robot_state == ROBOT_MAPPING:
+            self.publish_log("Mapping already running, ignoring MAP_START.")
+            return
+
+        if self.robot_state in (ROBOT_WORKING, ROBOT_PAUSED):
+            self.publish_log(f"Robot busy in state {self.robot_state}, refusing MAP_START.")
+            return
+
+        self.publish_log("Starting mapping process.")
 
         try:
-            # Start the robot control node
-            self.robot_control_process = subprocess.Popen(
-                ['ros2', 'launch', 'puppet_irl_bringup','mapping.launch.py'],
+            self.current_mapping_job = self.create_mapping_job()
+            self.save_current_job_metadata()
+
+            self.mapping_process = subprocess.Popen(
+                ['ros2', 'launch', 'puppet_irl_bringup', 'bringup_slam_then_nav2.launch.py'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE
             )
+
             self.send_stop_command()
-            self.publish_log("Started flipper_exploration.")
+            self.robot_state = ROBOT_MAPPING
 
-            self.robot_state = 1
-            self.publish_log("Started cartographer.launch.py.")
+            self.publish_log(
+                f"Mapping started. Job ID: {self.current_mapping_job['job_id']}"
+            )
 
         except Exception as e:
-            self.publish_log(f"Error starting exploration: {str(e)}")
+            self.robot_state = ROBOT_ERROR
+            self.publish_log(f"Error starting mapping: {str(e)}")
 
-    def stop_exploration(self):
-        """Handles stopping the exploration process."""
-        self.publish_log("Stopping exploration process.")
+    def stop_mapping_discard(self):
+        self.publish_log("Stopping mapping without saving preview.")
+        self.send_stop_command()
+        self._stop_mapping_stack()
 
-        # Stop exploration nodes using 'killall'
+        if self.current_mapping_job is not None:
+            self.current_mapping_job["status"] = "DISCARDED"
+            self.save_current_job_metadata()
+            self.current_mapping_job = None
+
+        self.robot_state = ROBOT_WAITING
+
+    def stop_mapping_save_temp(self):
+        self.publish_log("Stopping mapping and saving temporary preview.")
+        self.send_stop_command()
+
+        if self.current_mapping_job is None:
+            self.publish_log("No active mapping job, cannot save preview.")
+            self._stop_mapping_stack()
+            self.robot_state = ROBOT_WAITING
+            return
+
+        temp_map_base = self.current_mapping_job["temp_map_base"]
+
         try:
-            # Kill the naviguation and exploration nodes
-            subprocess.run(['pkill', 'f', 'explore'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            time.sleep(2)
+            subprocess.run(
+                ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', temp_map_base],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
+            self.current_mapping_job["status"] = "PREVIEW_READY"
+            self.save_current_job_metadata()
+            self.publish_log(f"Temporary map saved to {temp_map_base}")
+        except Exception as e:
+            self.current_mapping_job["status"] = "SAVE_TEMP_FAILED"
+            self.save_current_job_metadata()
+            self.publish_log(f"Error saving temporary map: {e}")
+
+        self._stop_mapping_stack()
+        self.robot_state = ROBOT_WAITING
+
+    def _stop_mapping_stack(self):
+        try:
             subprocess.run(['pkill', 'f', 'nav2'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            self.robot_state = 0
-            self.publish_log("Successfully killed slam node, naviguation node and exploration node.")
-
-        except Exception as e:
-            self.publish_log(f"Error stopping exploration nodes: {str(e)}")
-
-        #Save map made by slam
-        try:
-            time.sleep(2)  # Wait a bit before saving the map
-            subprocess.run(['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', path], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            self.publish_log("Successfully saved map to maps_library folder.")
-
-        except Exception as e:
-            self.publish_log(f"Error saving slam map: {str(e)}")
-
-        # Stop slam:
-        try:
             subprocess.run(['pkill', 'f', 'async_slam_tool'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-            self.publish_log("Successfully killed SLAM node.")
+            if hasattr(self, "mapping_process") and self.mapping_process is not None:
+                self.mapping_process = None
 
+            self.publish_log("Mapping stack stopped.")
         except Exception as e:
-            self.publish_log(f"Error stopping slam node: {str(e)}")
+            self.publish_log(f"Error stopping mapping stack: {e}")
+
+    def save_current_job_metadata(self):
+        if self.current_mapping_job is None:
+            return
+
+        meta_path = os.path.join(self.current_mapping_job["job_dir"], "job.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump(self.current_mapping_job, f, indent=2)
+
+    def save_mapping_final(self, data):
+        self.publish_log(f"MAP_SAVE_FINAL received but not implemented yet: {data}")
 
     def process_twist_command(self, data):
         """Processes and publishes velocity commands from the client."""
@@ -498,6 +552,18 @@ class AppCommandNode(Node):
         except Exception as e:
             self.get_logger().error(f"Error releasing GPIO: {e}")
 
+    def create_mapping_job(self):
+        job_id = datetime.now().strftime("job_%Y%m%d_%H%M%S")
+        job_dir = os.path.join(self.jobs_root, job_id)
+        os.makedirs(job_dir, exist_ok=True)
+
+        return {
+            "job_id": job_id,
+            "job_dir": job_dir,
+            "temp_map_base": os.path.join(job_dir, "temp_map"),
+            "status": "RUNNING",
+            "created_at": datetime.now().isoformat()
+        }
 #########################
 
 ####MAIN#####

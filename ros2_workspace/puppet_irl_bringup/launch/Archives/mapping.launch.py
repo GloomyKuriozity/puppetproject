@@ -29,5 +29,5 @@ def generate_launch_description():
     return LaunchDescription([
         slam_launch,
         TimerAction(period=5.0, actions=[nav2_launch]),
-        '''TimerAction(period=15.0, actions=[explore_launch]''')
+        TimerAction(period=15.0, actions=[explore_launch])
     ])

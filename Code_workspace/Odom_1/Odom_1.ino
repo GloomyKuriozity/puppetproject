@@ -8,7 +8,8 @@
 
 static const float WHEEL_BASE_M = 0.550f;
 
-volatile float battery_voltage = NAN;
+volatile float battery_voltage = 0.0f;
+volatile bool battery_valid = false;
 volatile float x = 0.0f, y = 0.0f, theta = 0.0f;
 volatile float linear_velocity = 0.0f, angular_velocity = 0.0f;
 
@@ -77,7 +78,8 @@ void loop()
 void updateBatteryVoltage(const uint8_t *buf)
 {
   const uint16_t decivolts = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
-  battery_voltage = decivolts * 0.1f;   // protocol unit = 0.1 V
+  battery_voltage = decivolts * 0.1f;
+  battery_valid = true;
   last_battery_update_ms = millis();
 }
 
@@ -97,7 +99,7 @@ void updateTelemetrySnapshot()
   telemetry.theta = theta;
   telemetry.linear_velocity = linear_velocity;
   telemetry.angular_velocity = angular_velocity;
-  telemetry.battery_voltage = battery_voltage;
+  telemetry.battery_voltage = battery_valid ? battery_voltage : 0.0f;
   interrupts();
 }
 

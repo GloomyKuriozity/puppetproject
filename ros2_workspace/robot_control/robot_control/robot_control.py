@@ -58,6 +58,8 @@ class CmdVelToCAN(Node):
         self.battery_low_warning = False
         self.battery_critical_warning = False
 
+        self.start_time = self.get_clock().now()
+
         self.prev_x_pose = 0
         self.prev_y_pose = 0
         self.prev_theta_pose = 0
@@ -117,7 +119,7 @@ class CmdVelToCAN(Node):
             data = self.read_i2c2_with_retries(24)
             if not self.check_data_coherence(data, now):
                 # Allow fallback TF if it's been at least 1 second since boot
-                time_since_start = (self.get_clock().now() - self.last_cmd_vel_time).nanoseconds / 1e9
+                time_since_start = (self.get_clock().now() - self.start_time).nanoseconds / 1e9
 
                 if self.last_odom_msg_time is None and time_since_start < 1.0:
                     return
@@ -202,10 +204,16 @@ class CmdVelToCAN(Node):
             self.update_battery_state()
             self.publish_robot_info()
 
-            # Check for NaN, Inf, or all-zero values
-            if not all(self.is_valid_number(val) for val in [x, y, theta, linear_velocity, angular_velocity, battery_voltage]):
+            # Validate odometry fields only
+            if not all(self.is_valid_number(val) for val in [x, y, theta, linear_velocity, angular_velocity]):
                 self.get_logger().warn("Odometry contains NaN or Inf values.")
                 return False
+
+            # Battery can be unavailable without invalidating odometry
+            if self.is_valid_number(battery_voltage):
+                self.battery_voltage = battery_voltage
+            else:
+                self.battery_voltage = float('nan')
 
             # Check for repeated pose
             # Compare rounded values to 0.0001 precision (0.1 mm)
@@ -236,13 +244,16 @@ class CmdVelToCAN(Node):
             return False
 
     def publish_odom_messages_tf(self, pose, v, w, now, source):
-        x_a = pose[0, 0]
-        y_a = pose[1, 0]
-        theta_a = pose[2, 0]
+        x_a = float(pose[0, 0])
+        y_a = float(pose[1, 0])
+        theta_a = float(pose[2, 0])
 
-        x =  y_a
-        y = -x_a
-        theta = theta_a - math.pi/2
+        v = float(v)
+        w = float(w)
+
+        x = float(y_a)
+        y = float(-x_a)
+        theta = float(theta_a - math.pi / 2.0)
 
         # Wrap theta to [-pi, pi]
         theta = (theta + math.pi) % (2 * math.pi) - math.pi
@@ -256,19 +267,19 @@ class CmdVelToCAN(Node):
         odom_msg.header.stamp = now.to_msg()
         odom_msg.header.frame_id = 'odom'
         odom_msg.child_frame_id = 'base_link'
-
-        odom_msg.pose.pose.position.x = x
-        odom_msg.pose.pose.position.y = y
+        
+        odom_msg.pose.pose.position.x = float(x)
+        odom_msg.pose.pose.position.y = float(y)
         odom_msg.pose.pose.position.z = 0.0
 
         odom_msg.pose.pose.orientation.x = 0.0
         odom_msg.pose.pose.orientation.y = 0.0
-        odom_msg.pose.pose.orientation.z = s
-        odom_msg.pose.pose.orientation.w = c
+        odom_msg.pose.pose.orientation.z = float(s)
+        odom_msg.pose.pose.orientation.w = float(c)
 
-        odom_msg.twist.twist.linear.x = v        # body-frame forward (+X)
-        odom_msg.twist.twist.linear.y = 0.0      # diff drive: no lateral velocity in body frame
-        odom_msg.twist.twist.angular.z = w
+        odom_msg.twist.twist.linear.x = float(v)
+        odom_msg.twist.twist.linear.y = 0.0
+        odom_msg.twist.twist.angular.z = float(w)
 
         self.odom_publisher.publish(odom_msg)
 
@@ -277,15 +288,15 @@ class CmdVelToCAN(Node):
         t.header.stamp = now.to_msg()
         t.header.frame_id = 'odom'
         t.child_frame_id = 'base_link'
-
-        t.transform.translation.x = x
-        t.transform.translation.y = y
+        
+        t.transform.translation.x = float(x)
+        t.transform.translation.y = float(y)
         t.transform.translation.z = 0.0
 
         t.transform.rotation.x = 0.0
         t.transform.rotation.y = 0.0
-        t.transform.rotation.z = s
-        t.transform.rotation.w = c
+        t.transform.rotation.z = float(s)
+        t.transform.rotation.w = float(c)
 
         self.br.sendTransform(t)
 
