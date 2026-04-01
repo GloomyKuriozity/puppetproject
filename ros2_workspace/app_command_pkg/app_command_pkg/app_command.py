@@ -19,6 +19,7 @@ import subprocess
 import os
 import gpiod
 import json
+import signal
 from datetime import datetime
 
 CMD_VEL_TIMEOUT = 1.0  # Timeout after which the robot stops if no command is received
@@ -34,8 +35,6 @@ ROBOT_PAUSED = "PAUSED"
 ROBOT_MAPPING = "MAPPING"
 ROBOT_CHARGING = "CHARGING"
 ROBOT_ERROR = "ERROR"
-
-user = os.getenv("USER")
 
 class AppCommandNode(Node):
 #####INITIALIZATION######
@@ -118,12 +117,14 @@ class AppCommandNode(Node):
         self.socket_thread.start()
 
         self.current_mapping_job = None
-        self.jobs_root = f"/home/{user}/ros2_ws/mapping_jobs"
+        self.home_dir = os.path.expanduser("~")
+        self.jobs_root = os.path.join(self.home_dir, "ros2_ws", "mapping_jobs")
         os.makedirs(self.jobs_root, exist_ok=True)
 
         # ROS timer to check for command timeout
         self.robot_state = ROBOT_WAITING
         self.heartbeat_timer = self.create_timer(HEARTBEAT_INTERVAL, self.send_heartbeat)
+        self.teleop_keepalive_timer = self.create_timer(0.2, self.teleop_keepalive_callback)
 #########################
 
 #####CALLBACKS######
@@ -207,6 +208,22 @@ class AppCommandNode(Node):
 ####################
 
 #####OTHER FUNCTIONS#####
+    def teleop_keepalive_callback(self):
+        """
+        Re-publish the latest cmd_vel while teleoperation is active,
+        so robot_control keeps receiving fresh commands.
+        """
+        if not self.teleoperation_active:
+            return
+
+        linear, angular = self.last_published_cmd_vel
+
+        with self.cmd_vel_lock:
+            twist = Twist()
+            twist.linear.x = linear
+            twist.angular.z = angular
+            self.cmd_vel_publisher.publish(twist)
+
     def _set_gpio_state(self, up: bool, down: bool):
         """Set GPIO 24 (UP) and 25 (DOWN) using persistent libgpiod lines."""
         with self.gpio_lock:
@@ -330,7 +347,6 @@ class AppCommandNode(Node):
                 self.get_logger().error(f"Error closing client socket: {e}")
         self.client_socket = None
         self.connected = False  # Properly reset the connected flag
-        self.connected = False
 
     def process_data(self, data):
         """Process incoming data, match known commands, and log actions."""
@@ -465,13 +481,35 @@ class AppCommandNode(Node):
 
     def _stop_mapping_stack(self):
         try:
-            subprocess.run(['pkill', 'f', 'nav2'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            subprocess.run(['pkill', 'f', 'async_slam_tool'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
             if hasattr(self, "mapping_process") and self.mapping_process is not None:
+                pid = self.mapping_process.pid
+
+                self.publish_log(f"Stopping mapping process group {pid}")
+
+                try:
+                    os.killpg(pid, signal.SIGINT)  # cleaner than SIGTERM for ROS
+                    time.sleep(2)
+
+                    if self.mapping_process.poll() is None:
+                        self.publish_log("Process still alive, escalating to SIGTERM")
+                        os.killpg(pid, signal.SIGTERM)
+                        time.sleep(2)
+
+                    if self.mapping_process.poll() is None:
+                        self.publish_log("Still alive, forcing SIGKILL")
+                        os.killpg(pid, signal.SIGKILL)
+
+                except ProcessLookupError:
+                    self.publish_log("Process group already dead")
+
                 self.mapping_process = None
 
-            self.publish_log("Mapping stack stopped.")
+            # Fallback cleanup (important in ROS)
+            subprocess.run(['pkill', '-f', 'slam_toolbox'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            subprocess.run(['pkill', '-f', 'nav2'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            self.publish_log("Mapping stack stopped (forced cleanup).")
+
         except Exception as e:
             self.publish_log(f"Error stopping mapping stack: {e}")
 
@@ -493,15 +531,14 @@ class AppCommandNode(Node):
             linear = float(linear.replace(',', '.'))
             angular = float(angular.replace(',', '.'))
 
-            self.teleoperation_active = True
-
             with self.cmd_vel_lock:
                 twist = Twist()
                 twist.linear.x = linear
                 twist.angular.z = angular
                 self.cmd_vel_publisher.publish(twist)
                 self.last_cmd_vel_time = self.get_clock().now()
-                self.last_published_cmd_vel = (linear, angular)  # Update the last published values
+                self.last_published_cmd_vel = (linear, angular)
+                self.teleoperation_active = not (abs(linear) < 1e-4 and abs(angular) < 1e-4)
                 self.publish_log(f"Published cmd_vel - Linear: {linear}, Angular: {angular}")
 
         except ValueError:
@@ -516,6 +553,8 @@ class AppCommandNode(Node):
             twist.linear.x = 0.0
             twist.angular.z = 0.0
             self.cmd_vel_publisher.publish(twist)
+            self.last_published_cmd_vel = (0.0, 0.0)
+            self.teleoperation_active = False
             self.publish_log("Published stop command")
 
     def publish_log(self, message):

@@ -307,22 +307,37 @@ class CmdVelToCAN(Node):
         )
 
     def voltage_to_percentage(self, voltage):
-        """
-        Rough voltage -> percentage mapping.
-        Tune these thresholds to your real battery pack.
-        """
         if not self.is_valid_number(voltage):
             return None
 
-        v_min = 21.0   # empty-ish under light load
-        v_max = 25.2   # full for 6S Li-ion
+        curve = [
+            (29.2, 100),
+            (28.0, 90),
+            (27.0, 75),
+            (26.0, 65),
+            (25.0, 55),
+            (24.0, 50),
+            (23.0, 30),
+            (22.0, 15),
+            (21.0, 0),
+        ]
 
-        if voltage <= v_min:
-            return 0.0
-        if voltage >= v_max:
+        # Clamp
+        if voltage >= curve[0][0]:
             return 100.0
+        if voltage <= curve[-1][0]:
+            return 0.0
 
-        return round((voltage - v_min) / (v_max - v_min) * 100.0, 1)
+        # Interpolate
+        for i in range(len(curve) - 1):
+            v_high, p_high = curve[i]
+            v_low, p_low = curve[i + 1]
+
+            if v_low <= voltage <= v_high:
+                ratio = (voltage - v_low) / (v_high - v_low)
+                return round(p_low + ratio * (p_high - p_low), 1)
+
+        return None
     
     def update_battery_state(self):
         if not self.is_valid_number(self.battery_voltage):
