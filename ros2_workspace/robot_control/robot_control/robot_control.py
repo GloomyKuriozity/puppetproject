@@ -1,7 +1,7 @@
 '''
 Author: Mélanie Geulin
 
-Last Update: 08/07/2025
+Last Update: 1/04/2026
 
 Script: robot_control
 
@@ -168,16 +168,16 @@ class CmdVelToCAN(Node):
         backoff = 1
         for attempt in range(max_retries):
             try:
-                data = self.bus_2.read_i2c_block_data(self.arduino_address_2, 0, length)
-                return data
+                read = smbus2.i2c_msg.read(self.arduino_address_2, length)
+                self.bus_2.i2c_rdwr(read)
+                return list(read)
             except Exception as e:
                 self.get_logger().error(f"Attempt {attempt + 1} to read I2C2 failed: {e}")
                 if attempt + 1 == max_retries:
-                    raise e  # Re-raise after max retries
-                else:
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, 32)  # Cap the backoff
-
+                    raise
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 32)
+                
     def send_stop_command(self):
         '''
         Send a stop command to the robot by setting velocities to zero.
@@ -198,22 +198,24 @@ class CmdVelToCAN(Node):
 
         try:
             x, y, theta, linear_velocity, angular_velocity, battery_voltage = struct.unpack('<ffffff', bytearray(data[:24]))
-            self.current_linear_vel = linear_velocity
-            self.current_angular_vel = angular_velocity
-            self.battery_voltage = battery_voltage
-            self.update_battery_state()
-            self.publish_robot_info()
 
             # Validate odometry fields only
             if not all(self.is_valid_number(val) for val in [x, y, theta, linear_velocity, angular_velocity]):
                 self.get_logger().warn("Odometry contains NaN or Inf values.")
+                self.get_logger().warn(f"Raw unpacked values: x={x}, y={y}, theta={theta}, v={linear_velocity}, w={angular_velocity}, batt={battery_voltage}")
                 return False
 
-            # Battery can be unavailable without invalidating odometry
-            if self.is_valid_number(battery_voltage):
+            self.current_linear_vel = linear_velocity
+            self.current_angular_vel = angular_velocity
+
+            # Battery handling
+            if self.is_valid_number(battery_voltage) and battery_voltage >= 0.0:
                 self.battery_voltage = battery_voltage
             else:
                 self.battery_voltage = float('nan')
+
+            self.update_battery_state()
+            self.publish_robot_info()
 
             # Check for repeated pose
             # Compare rounded values to 0.0001 precision (0.1 mm)
