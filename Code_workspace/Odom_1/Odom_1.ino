@@ -8,8 +8,7 @@
 
 static const float WHEEL_BASE_M = 0.550f;
 
-volatile float battery_voltage = 0.0f;
-volatile bool battery_valid = false;
+volatile float battery_voltage = -5.0f;
 volatile float x = 0.0f, y = 0.0f, theta = 0.0f;
 volatile float linear_velocity = 0.0f, angular_velocity = 0.0f;
 
@@ -36,14 +35,14 @@ struct TelemetryPayload {
   float battery_voltage;
 };
 
-volatile TelemetryPayload telemetry = {0};
+TelemetryPayload telemetry = {0};
 
 void setup()
 {
-  Serial.begin(1000000);
+  //Serial.begin(9600);
 
   Wire.begin(I2C_SLAVE_ADDRESS);
-  Wire.setClock(400000);
+  Wire.setClock(100000);
   Wire.onRequest(onI2CRequest);
 
   CAN.begin(MCP_ANY, CAN_500KBPS, MCP_8MHZ);
@@ -60,7 +59,7 @@ void loop()
 
     uint32_t now = millis();
     if (now - lastPrintMs >= 50) {
-      dumpRX(canId, len, buf);
+      //dumpRX(canId, len, buf);
       lastPrintMs = now;
     }
 
@@ -73,13 +72,13 @@ void loop()
     }
   }
   updateTelemetrySnapshot();
+  //dumpTelemetry();
 }
 
 void updateBatteryVoltage(const uint8_t *buf)
 {
   const uint16_t decivolts = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
-  battery_voltage = decivolts * 0.1f;
-  battery_valid = true;
+  battery_voltage = decivolts * 0.1f;   // protocol unit = 0.1 V
   last_battery_update_ms = millis();
 }
 
@@ -99,9 +98,21 @@ void updateTelemetrySnapshot()
   telemetry.theta = theta;
   telemetry.linear_velocity = linear_velocity;
   telemetry.angular_velocity = angular_velocity;
-  telemetry.battery_voltage = battery_valid ? battery_voltage : 0.0f;
+  telemetry.battery_voltage = battery_voltage;
   interrupts();
 }
+
+void dumpTelemetry()
+{
+  Serial.print(" x = "); Serial.print(x);
+  Serial.print(" y = "); Serial.print(y);
+  Serial.print(" theta = "); Serial.print(theta);
+  Serial.print(" linear_velocity = "); Serial.print(linear_velocity);
+  Serial.print(" angular_velocity = "); Serial.print(angular_velocity);
+  Serial.print(" battery_voltage = "); Serial.print(battery_voltage);
+  Serial.println();
+}
+
 
 void dumpRX(unsigned long id, uint8_t len, uint8_t* buf)
 {
