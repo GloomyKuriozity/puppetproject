@@ -81,6 +81,7 @@ class AppCommandNode(Node):
         self.teleoperation_active = False
         self.connected = False
         self.client_socket = None
+        self.rx_buffer = ""
         self.last_cmd_vel_time = self.get_clock().now()
         self.last_heartbeat_time = self.get_clock().now()
         self.cmd_vel_lock = threading.Lock()
