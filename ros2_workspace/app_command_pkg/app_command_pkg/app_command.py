@@ -85,6 +85,8 @@ class AppCommandNode(Node):
         self.last_cmd_vel_time = self.get_clock().now()
         self.last_heartbeat_time = self.get_clock().now()
         self.cmd_vel_lock = threading.Lock()
+        self.disconnect_time = None
+        self.safety_timer = self.create_timer(1.0, self.safety_watchdog_callback)
 
         # Store last published velocity to prevent spam
         self.last_published_cmd_vel = (0.0, 0.0)  # (linear, angular)
@@ -206,6 +208,38 @@ class AppCommandNode(Node):
             except Exception as e:
                 self.get_logger().error(f"Error sending contamination data: {e}")
                 self.disconnect_client()
+
+    def safety_watchdog_callback(self):
+        """
+        If mapping is active but the client has been disconnected for too long,
+        discard the session and stop the mapping stack automatically.
+        Also recover from stale MAPPING state if the stack is already gone.
+        """
+        try:
+            if self.robot_state != ROBOT_MAPPING:
+                return
+
+            # Case 1: mapping state is stale but process is already gone
+            if self.mapping_process is None:
+                self.publish_log("Detected stale MAPPING state with no active mapping process. Resetting to WAITING.")
+                if self.current_mapping_job is not None:
+                    self.current_mapping_job["status"] = "DISCARDED"
+                    self.save_current_job_metadata()
+                    self.current_mapping_job = None
+                self.robot_state = ROBOT_WAITING
+                self.disconnect_time = None
+                return
+
+            # Case 2: disconnected too long during mapping
+            if not self.connected and self.disconnect_time is not None:
+                elapsed = time.time() - self.disconnect_time
+                if elapsed >= 10.0:
+                    self.publish_log("Client lost for >10s during mapping. Discarding mapping session.")
+                    self.stop_mapping_discard()
+                    self.disconnect_time = None
+
+        except Exception as e:
+            self.publish_log(f"Safety watchdog error: {e}")
 ####################
 
 #####OTHER FUNCTIONS#####
@@ -305,6 +339,7 @@ class AppCommandNode(Node):
                     self.client_socket.settimeout(1.0)
                     self.publish_log(f"Connected to {addr}")
                     self.connected = True
+                    self.disconnect_time = None
                 except socket.timeout:
                     pass  # Try accepting again if no connection yet
                 except socket.error as e:
@@ -317,7 +352,13 @@ class AppCommandNode(Node):
                         start_time = time.time()  # Start latency monitoring
                         data = self.client_socket.recv(1024)
                         if data:
-                            self.process_data(data.decode('utf-8').strip())
+                            self.rx_buffer += data.decode('utf-8')
+
+                            while '\n' in self.rx_buffer:
+                                line, self.rx_buffer = self.rx_buffer.split('\n', 1)
+                                line = line.strip()
+                                if line:
+                                    self.process_data(line)
                         else:
                             self.publish_log("Client disconnected.")
                             self.disconnect_client()
@@ -349,6 +390,18 @@ class AppCommandNode(Node):
         self.client_socket = None
         self.connected = False  # Properly reset the connected flag
 
+    def looks_like_twist_command(self, data):
+        parts = data.split(';')
+        if len(parts) != 2:
+            return False
+
+        try:
+            float(parts[0].strip().replace(',', '.'))
+            float(parts[1].strip().replace(',', '.'))
+            return True
+        except ValueError:
+            return False
+
     def process_data(self, data):
         """Process incoming data, match known commands, and log actions."""
         self.publish_log(f"Processing data: {data}")
@@ -372,8 +425,8 @@ class AppCommandNode(Node):
             case "HOME":
                 self.handle_home_command()
             case "STOP_PROBE":
-                self.handle_probe_stop_command()  # <-- add this
-            case _ if ";" in data:
+                self.handle_probe_stop_command()
+            case _ if self.looks_like_twist_command(data):
                 self.process_twist_command(data)
             case _:
                 self.publish_log(f"Unknown command: {data}")
@@ -407,8 +460,13 @@ class AppCommandNode(Node):
     
     def start_mapping(self):
         if self.robot_state == ROBOT_MAPPING:
-            self.publish_log("Mapping already running, ignoring MAP_START.")
-            return
+            if self.mapping_process is None:
+                self.publish_log("Stale MAPPING state detected. Resetting before starting new mapping.")
+                self.robot_state = ROBOT_WAITING
+                self.current_mapping_job = None
+            else:
+                self.publish_log("Mapping already running, ignoring MAP_START.")
+                return
 
         if self.robot_state in (ROBOT_WORKING, ROBOT_PAUSED):
             self.publish_log(f"Robot busy in state {self.robot_state}, refusing MAP_START.")
@@ -448,6 +506,7 @@ class AppCommandNode(Node):
             self.current_mapping_job = None
 
         self.robot_state = ROBOT_WAITING
+        self.disconnect_time = None
 
     def stop_mapping_save_temp(self):
         self.publish_log("Stopping mapping and saving temporary preview.")
@@ -482,34 +541,21 @@ class AppCommandNode(Node):
 
     def _stop_mapping_stack(self):
         try:
-            if hasattr(self, "mapping_process") and self.mapping_process is not None:
-                pid = self.mapping_process.pid
+            self.publish_log("Stopping mapping stack using pkill -f nav2 ...")
 
-                self.publish_log(f"Stopping mapping process group {pid}")
+            result = subprocess.run(
+                ['pkill', '-f', 'nav2'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
 
-                try:
-                    os.killpg(pid, signal.SIGINT)  # cleaner than SIGTERM for ROS
-                    time.sleep(2)
+            self.publish_log(f"pkill return code: {result.returncode}")
+            self.publish_log("Waiting 20 seconds for mapping stack shutdown...")
+            time.sleep(20)
 
-                    if self.mapping_process.poll() is None:
-                        self.publish_log("Process still alive, escalating to SIGTERM")
-                        os.killpg(pid, signal.SIGTERM)
-                        time.sleep(2)
-
-                    if self.mapping_process.poll() is None:
-                        self.publish_log("Still alive, forcing SIGKILL")
-                        os.killpg(pid, signal.SIGKILL)
-
-                except ProcessLookupError:
-                    self.publish_log("Process group already dead")
-
-                self.mapping_process = None
-
-            # Fallback cleanup (important in ROS)
-            subprocess.run(['pkill', '-f', 'slam_toolbox'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            subprocess.run(['pkill', '-f', 'nav2'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-
-            self.publish_log("Mapping stack stopped (forced cleanup).")
+            self.mapping_process = None
+            self.publish_log("Mapping stack stopped.")
 
         except Exception as e:
             self.publish_log(f"Error stopping mapping stack: {e}")
