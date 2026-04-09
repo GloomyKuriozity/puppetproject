@@ -7,7 +7,7 @@ slam_toolbox:
     map_frame: map
     base_frame: base_link
     scan_topic: /scan
-    mode: mapping #localization
+    mode: mapping
 
     debug_logging: false
     throttle_scans: 1
@@ -25,7 +25,7 @@ slam_toolbox:
     # General Parameters
     use_scan_matching: true
     use_scan_barycenter: false
-    minimum_travel_distance: 0.25
+    minimum_travel_distance: 0.15
     minimum_travel_heading: 0.05
     scan_buffer_size: 20
     scan_buffer_maximum_scan_distance: 10.0

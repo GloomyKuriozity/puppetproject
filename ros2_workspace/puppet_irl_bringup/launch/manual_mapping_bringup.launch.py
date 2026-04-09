@@ -13,21 +13,6 @@ def generate_launch_description():
             PathJoinSubstitution([puppet_dir, 'launch', 'slam_toolbox.launch.py'])
         ]),
     )
-
-    nav2_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([puppet_dir, 'launch', 'nav2_launch.py'])
-        ]),
-    )
-
-    '''explore_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([explore_dir, 'launch', 'explore.launch.py'])
-        ]),
-    )'''
-
+    
     return LaunchDescription([
-        slam_launch,
-        TimerAction(period=5.0, actions=[nav2_launch]),
-        '''TimerAction(period=15.0, actions=[explore_launch]''')
     ])

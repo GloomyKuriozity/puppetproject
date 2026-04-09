@@ -1,7 +1,9 @@
 '''
-Author: Mélanie Geulin
+Author: Melanie Geulin
 
-Last Update: 1/04/2026
+Mail: melanie.geulin@orano.group
+
+Last Update: 09/04/2026
 
 Script: robot_control
 
@@ -14,7 +16,6 @@ import smbus2
 import struct
 import math
 import time
-import threading
 import numpy as np
 from std_msgs.msg import String
 from rclpy.node import Node
@@ -23,43 +24,38 @@ from geometry_msgs.msg import Twist, TransformStamped
 from nav_msgs.msg import Odometry
 from tf2_ros import TransformBroadcaster
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 
-CMD_VEL_GRACE_PERIOD = 0.8
-MIN_THETA_CHANGE = 0.0001  # radians, ~0.057°
-
-BASE_IS_BACK_OFFSET_RAD = 0.0
-THETA_OFFSET_RAD = math.pi / 2
+MIN_THETA_CHANGE = 0.0001           # radians, ~0.057°
 
 class CmdVelToCAN(Node):
 #####INITIALIZATION#####
     def __init__(self):
         super().__init__('robot_control')
 
-        self.get_logger().info('Init I2C...')
+        ####INIT CONNEXION Arduino/RP5####
         self.bus = smbus2.SMBus(1)      # I2C 1 bus number velocities + charger
         self.bus_2 = smbus2.SMBus(3)    # I2C 2 bus number odometry
         self.arduino_address = 0x11     # I2C 1 address of the Arduino (11 in decimal)
         self.arduino_address_2 = 0x22   # I2C 2 address of the Arduino (22 in decimal)
-        self.get_logger().info('I2C init complete!')
 
+        ####PUBLISHERS####
         self.odom_publisher = self.create_publisher(Odometry, 'odom', 10)
-        self.subscription = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, 10)
-        self.timer = self.create_timer(0.33, self.timer_callback)
         self.robot_info_publisher = self.create_publisher(String, 'robot_info', 10)
 
-        self.br = TransformBroadcaster(self)    # Transform buffer
-        self.cmd_vel_queue = deque(maxlen=10)   # Buffer for cmd_vel messages
-        self.last_cmd_vel_time = self.get_clock().now()
-        self.cmd_vel_event = threading.Event()
-        self.has_sent_stop = False
+        ####SUBSCRIBER####
+        cmd_vel_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+        self.subscription = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, cmd_vel_qos)
 
-        self.battery_voltage = float('nan')
-        self.battery_percentage = None
-        self.battery_low_warning = False
-        self.battery_critical_warning = False
-
-        self.start_time = self.get_clock().now()
-
+        ####TIMER####
+        self.timer = self.create_timer(0.33, self.timer_callback)
+        
+        ####ODOM VARIABLES####
+        self.br = TransformBroadcaster(self) 
         self.prev_x_pose = 0
         self.prev_y_pose = 0
         self.prev_theta_pose = 0
@@ -67,31 +63,56 @@ class CmdVelToCAN(Node):
         self.prev_angular_vel = 0
         self.last_odom_msg_time = None
 
+        ####VELOCITY VARIABLES####
+        self.has_sent_stop = False
         self.real_linear_vel = 0
         self.real_angular_vel = 0
         self.current_angular_vel = 0
         self.current_linear_vel = 0
-        self.too_long_reactivity = self.get_clock().now()
 
-        self.cmd_vel_thread = threading.Thread(target=self.cmd_vel_thread_worker, daemon=True)
-        self.cmd_vel_thread.start()
+        ####BATTERY VARIABLES####
+        self.battery_voltage = float('nan')
+        self.battery_percentage = None
+        self.battery_low_warning = False
+        self.battery_critical_warning = False
+
+        ####SYNC CHECKER VARIABLES####
+        self.start_time = self.get_clock().now()
+        self.too_long_reactivity = self.get_clock().now()
+        self.last_cmd_vel_time = self.get_clock().now()
 ########################
 
 #####CALLBACKS######
     def cmd_vel_callback(self, msg):
-        '''
-        Callback command vel received by PC/app_command
-        '''
+        """
+        Receive a velocity command from ROS, forward it immediately to the Arduino over I2C,
+        and update the latest commanded linear and angular speeds.
+
+        Also marks whether the latest received command is a full stop.
+        """
         linear_x = msg.linear.x
         angular_z = msg.angular.z
-        self.cmd_vel_queue.append((linear_x, angular_z))
+
         self.last_cmd_vel_time = self.get_clock().now()
-        self.cmd_vel_event.set()
+
+        message = struct.pack('ff', linear_x, angular_z)
+        self.send_via_i2c_1(message)
+
+        self.real_linear_vel = linear_x
+        self.real_angular_vel = angular_z
+        self.has_sent_stop = (abs(linear_x) < 1e-4 and abs(angular_z) < 1e-4)
 
     def timer_callback(self):
-        '''
-        Manage odometry received from arduino
-        '''
+        """
+        Periodic supervisor callback.
+
+        Responsibilities:
+        - detect cmd_vel timeout and send a one-time stop command if needed
+        - monitor command/odometry consistency
+        - read odometry and battery data from Arduino over I2C
+        - validate received data
+        - publish odometry and TF, or reuse previous valid pose if current data is incoherent
+        """
         #Security stop handler
         time_since_last_cmd_vel = (self.get_clock().now() - self.last_cmd_vel_time).nanoseconds / 1e9
 
@@ -131,30 +152,15 @@ class CmdVelToCAN(Node):
             self.get_logger().error(f"Error reading I2C data: {e}")
 ####################
 
-
-#####THREAD WORKER#####
-    def cmd_vel_thread_worker(self):
-        '''
-        Separate thread to handle the cmd_vel commands.
-        It continuously checks the cmd_vel_queue and processes the commands.
-        '''
-        while rclpy.ok():
-            # Wait for an event or timeout
-            if self.cmd_vel_event.wait(timeout=CMD_VEL_GRACE_PERIOD):  # Wait for up to 1 second
-                while self.cmd_vel_queue:
-                    linear_x, angular_z = self.cmd_vel_queue.popleft()
-                    message = struct.pack('ff', linear_x, angular_z)
-                    self.send_via_i2c_1(message)
-                    time.sleep(0.05)  # 50ms between I²C messages
-
-                # Reset the event once the queue is empty
-                self.has_sent_stop = False
-                self.cmd_vel_event.clear()
-
-#######################
-
 #####OTHER FUNCTIONS#####
+
+#####ARDUINO COMMUNICATION#####
     def send_via_i2c_1(self, message, max_retries=3):
+        """
+        Send a raw byte message to the velocity Arduino on I2C bus 1.
+
+        Retries a few times before reporting a permanent communication failure.
+        """
         for attempt in range(max_retries):
             try:
                 self.bus.write_i2c_block_data(self.arduino_address, 0, list(message))
@@ -165,6 +171,11 @@ class CmdVelToCAN(Node):
                     self.get_logger().error('Max retries reached, could not send I2C message')
 
     def read_i2c2_with_retries(self, length, max_retries=3):
+        """
+        Read a fixed-length byte payload from the odometry Arduino on I2C bus 3.
+
+        Retries with exponential backoff before raising the error.
+        """
         backoff = 1
         for attempt in range(max_retries):
             try:
@@ -177,75 +188,28 @@ class CmdVelToCAN(Node):
                     raise
                 time.sleep(backoff)
                 backoff = min(backoff * 2, 32)
-                
+#########################
+
+#####VELOCITY FUNCTIONS#####          
     def send_stop_command(self):
-        '''
-        Send a stop command to the robot by setting velocities to zero.
-        '''
+        """
+        Send an immediate zero-velocity command to the robot over I2C.
+
+        Also resets the internally tracked commanded linear and angular velocities.
+        """
         message = struct.pack('ff', 0.0, 0.0)  # Zero velocities
         self.send_via_i2c_1(message)
         self.real_angular_vel = 0.0
         self.real_linear_vel = 0.0
+#########################
 
-    def is_valid_number(self, x):
-        return not (math.isnan(x) or math.isinf(x))
-
-    def check_data_coherence(self, data, now):
-        # Check if data has the correct length
-        if len(data) != 24:
-            self.get_logger().warn(f"Received data of invalid length: {len(data)} bytes.")
-            return False
-
-        try:
-            x, y, theta, linear_velocity, angular_velocity, battery_voltage = struct.unpack('<ffffff', bytearray(data[:24]))
-
-            # Validate odometry fields only
-            if not all(self.is_valid_number(val) for val in [x, y, theta, linear_velocity, angular_velocity]):
-                self.get_logger().warn("Odometry contains NaN or Inf values.")
-                self.get_logger().warn(f"Raw unpacked values: x={x}, y={y}, theta={theta}, v={linear_velocity}, w={angular_velocity}, batt={battery_voltage}")
-                return False
-
-            self.current_linear_vel = linear_velocity
-            self.current_angular_vel = angular_velocity
-
-            # Battery handling
-            if self.is_valid_number(battery_voltage) and battery_voltage >= 0.0:
-                self.battery_voltage = battery_voltage
-            else:
-                self.battery_voltage = float('nan')
-
-            self.update_battery_state()
-            self.publish_robot_info()
-
-            # Check for repeated pose
-            # Compare rounded values to 0.0001 precision (0.1 mm)
-            if (round(x, 4) == round(self.prev_x_pose, 4) and
-                round(y, 4) == round(self.prev_y_pose, 4) and
-                abs(theta - self.prev_theta_pose) < MIN_THETA_CHANGE):
-                if self.real_angular_vel != 0 or self.real_linear_vel != 0:
-                    self.get_logger().warn("Odometry data is unchanged from previous reading but robot is moving.")
-                    return False
-                else:
-                    self.get_logger().warn("Odometry data is unchanged from previous reading but robot is NOT moving.")
-
-            # Update previous pose for future comparison
-            self.prev_x_pose = round(x, 4)
-            self.prev_y_pose = round(y, 4)
-            self.prev_theta_pose = theta
-            self.prev_linear_vel = linear_velocity
-            self.prev_angular_vel = angular_velocity
-            self.last_odom_msg_time = now
-
-            pose_array = np.array([[x], [y], [theta]])
-            self.publish_odom_messages_tf(pose_array, linear_velocity, angular_velocity, now, source="ODOM")
-
-            return True
-
-        except struct.error as e:
-            self.get_logger().error(f"Error unpacking odometry data: {e}")
-            return False
-
+#####ODOM FUNCTIONS#####
     def publish_odom_messages_tf(self, pose, v, w, now, source):
+        """
+        Publish odometry and odom->base_link TF from the given pose and velocity values.
+
+        Applies the coordinate transform used by this robot setup before publishing.
+        """
         x_a = float(pose[0, 0])
         y_a = float(pose[1, 0])
         theta_a = float(pose[2, 0])
@@ -305,8 +269,60 @@ class CmdVelToCAN(Node):
         self.get_logger().info(
             f"[TF] odom->base_link at x={x:.2f}, y={y:.2f}, theta(raw)={pose[2,0]:.3f}, yaw(used)={theta:.3f}"
         )
+#########################
+
+#####BATTERY FUNCTIONS#####
+    def update_battery_state(self):
+        """
+        Update battery percentage and warning flags from the current battery voltage.
+
+        Sets low and critical battery flags according to the configured thresholds.
+        """
+        if not self.is_valid_number(self.battery_voltage):
+            self.battery_percentage = None
+            self.battery_low_warning = False
+            self.battery_critical_warning = False
+            return
+
+        self.battery_percentage = self.voltage_to_percentage(self.battery_voltage)
+
+        if self.battery_percentage is None:
+            self.battery_low_warning = False
+            self.battery_critical_warning = False
+            return
+
+        self.battery_low_warning = self.battery_percentage < 15.0
+        self.battery_critical_warning = self.battery_percentage < 5.0
+
+    def publish_robot_info(self):
+        """
+        Publish current battery telemetry as a formatted string on the 'robot_info' topic.
+
+        Includes:
+        - battery voltage
+        - battery percentage
+        - low battery warning
+        - critical battery warning
+        """
+        msg = String()
+
+        if self.battery_percentage is None:
+            msg.data = f"battery_voltage={self.battery_voltage:.2f};battery_percentage=unknown;low_warning=0;critical_warning=0"
+        else:
+            msg.data = (
+                f"battery_voltage={self.battery_voltage:.2f};"
+                f"battery_percentage={self.battery_percentage:.1f};"
+                f"low_warning={int(self.battery_low_warning)};"
+                f"critical_warning={int(self.battery_critical_warning)}"
+            )
+
+        self.robot_info_publisher.publish(msg)
 
     def voltage_to_percentage(self, voltage):
+        """
+        Convert battery voltage into an estimated battery percentage using the configured
+        piecewise interpolation curve.
+        """
         if not self.is_valid_number(voltage):
             return None
 
@@ -338,39 +354,82 @@ class CmdVelToCAN(Node):
                 return round(p_low + ratio * (p_high - p_low), 1)
 
         return None
-    
-    def update_battery_state(self):
-        if not self.is_valid_number(self.battery_voltage):
-            self.battery_percentage = None
-            self.battery_low_warning = False
-            self.battery_critical_warning = False
-            return
+#########################
 
-        self.battery_percentage = self.voltage_to_percentage(self.battery_voltage)
+#####COHERENCE CHECKER FUNCTIONS#####
+    def is_valid_number(self, x):
+        """
+        Return True if the given numeric value is finite and usable.
 
-        if self.battery_percentage is None:
-            self.battery_low_warning = False
-            self.battery_critical_warning = False
-            return
+        Rejects NaN and infinite values.
+        """
+        return not (math.isnan(x) or math.isinf(x))
 
-        self.battery_low_warning = self.battery_percentage < 15.0
-        self.battery_critical_warning = self.battery_percentage < 5.0
+    def check_data_coherence(self, data, now):
+        """
+        Validate and unpack the odometry/battery packet received from Arduino.
 
-    def publish_robot_info(self):
-        msg = String()
+        Checks:
+        - expected packet size
+        - finite odometry values
+        - repeated pose inconsistencies while motion is commanded
 
-        if self.battery_percentage is None:
-            msg.data = f"battery_voltage={self.battery_voltage:.2f};battery_percentage=unknown;low_warning=0;critical_warning=0"
-        else:
-            msg.data = (
-                f"battery_voltage={self.battery_voltage:.2f};"
-                f"battery_percentage={self.battery_percentage:.1f};"
-                f"low_warning={int(self.battery_low_warning)};"
-                f"critical_warning={int(self.battery_critical_warning)}"
-            )
+        If valid:
+        - updates cached pose/velocity values
+        - updates battery state
+        - publishes odometry and TF
 
-        self.robot_info_publisher.publish(msg)
+        Returns True if the data is coherent, otherwise False.
+        """
+        if len(data) != 24:
+            self.get_logger().warn(f"Received data of invalid length: {len(data)} bytes.")
+            return False
 
+        try:
+            x, y, theta, linear_velocity, angular_velocity, battery_voltage = struct.unpack('<ffffff', bytearray(data[:24]))
+
+            if not all(self.is_valid_number(val) for val in [x, y, theta, linear_velocity, angular_velocity]):
+                self.get_logger().warn("Odometry contains NaN or Inf values.")
+                self.get_logger().warn(f"Raw unpacked values: x={x}, y={y}, theta={theta}, v={linear_velocity}, w={angular_velocity}, batt={battery_voltage}")
+                return False
+
+            self.current_linear_vel = linear_velocity
+            self.current_angular_vel = angular_velocity
+
+            # Battery handling
+            if self.is_valid_number(battery_voltage) and battery_voltage >= 0.0:
+                self.battery_voltage = battery_voltage
+            else:
+                self.battery_voltage = float('nan')
+
+            self.update_battery_state()
+            self.publish_robot_info()
+
+            if (round(x, 4) == round(self.prev_x_pose, 4) and
+                round(y, 4) == round(self.prev_y_pose, 4) and
+                abs(theta - self.prev_theta_pose) < MIN_THETA_CHANGE):
+                if self.real_angular_vel != 0 or self.real_linear_vel != 0:
+                    self.get_logger().warn("Odometry data is unchanged from previous reading but robot is moving.")
+                    return False
+                else:
+                    self.get_logger().warn("Odometry data is unchanged from previous reading but robot is NOT moving.")
+
+            self.prev_x_pose = round(x, 4)
+            self.prev_y_pose = round(y, 4)
+            self.prev_theta_pose = theta
+            self.prev_linear_vel = linear_velocity
+            self.prev_angular_vel = angular_velocity
+            self.last_odom_msg_time = now
+
+            pose_array = np.array([[x], [y], [theta]])
+            self.publish_odom_messages_tf(pose_array, linear_velocity, angular_velocity, now, source="ODOM")
+
+            return True
+
+        except struct.error as e:
+            self.get_logger().error(f"Error unpacking odometry data: {e}")
+            return False
+#########################
 #########################
 
 #####MAIN#####
@@ -378,7 +437,6 @@ def main(args=None):
     rclpy.init(args=args)
     node = CmdVelToCAN()
 
-    # Use MultiThreadedExecutor to allow separate processing of cmd_vel and odom callbacks
     executor = MultiThreadedExecutor()
     executor.add_node(node)
 
