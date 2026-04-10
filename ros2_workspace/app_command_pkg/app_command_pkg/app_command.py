@@ -3,7 +3,7 @@ Author: Melanie Geulin
 
 Mail: melanie.geulin@orano.group
 
-Last Update: 09/04/2026
+Last Update: 10/04/2026
 
 Script: app_command
 
@@ -108,6 +108,8 @@ class AppCommandNode(Node):
         self.current_mapping_job = None
         self.home_dir = os.path.expanduser("~")
         self.jobs_root = os.path.join(self.home_dir, "ros2_ws", "mapping_jobs")
+        self.maps_library_root = os.path.join(self.home_dir, "maps_library")
+        os.makedirs(self.maps_library_root, exist_ok=True)
         os.makedirs(self.jobs_root, exist_ok=True)
 
         #Pose info variables
@@ -914,9 +916,9 @@ class AppCommandNode(Node):
         MAP_SAVE_FINAL:<map_key>;<display_name>
 
         Responsible for:
-        - saving latest map to disk
+        - saving latest map to disk on robot
         - stopping mapping cleanly
-        - finalizing job
+        - finalizing job metadata
         """
         try:
             payload = data.split(":", 1)[1]
@@ -924,6 +926,69 @@ class AppCommandNode(Node):
         except Exception:
             self.publish_log(f"Invalid MAP_SAVE_FINAL format: {data}")
             return
+
+        if self.current_mapping_job is None:
+            self.publish_log("No active mapping job, cannot save final map.")
+            self.robot_state = ROBOT_WAITING
+            return
+
+        map_id = self.sanitize_map_name(map_key)
+        final_map_dir = os.path.join(self.maps_library_root, map_id)
+        os.makedirs(final_map_dir, exist_ok=True)
+
+        final_map_base = os.path.join(final_map_dir, map_id)
+
+        try:
+            self.publish_log(f"Saving final map to {final_map_base}")
+
+            result = subprocess.run(
+                ['ros2', 'run', 'nav2_map_server', 'map_saver_cli', '-f', final_map_base],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+
+            self.publish_log(f"map_saver_cli return code: {result.returncode}")
+
+            if result.stdout:
+                self.publish_log(f"map_saver_cli stdout: {result.stdout.strip()}")
+
+            if result.stderr:
+                self.publish_log(f"map_saver_cli stderr: {result.stderr.strip()}")
+
+            yaml_path = final_map_base + ".yaml"
+            pgm_path = final_map_base + ".pgm"
+
+            if result.returncode == 0 and os.path.exists(yaml_path) and os.path.exists(pgm_path):
+                self.current_mapping_job["status"] = "FINAL_SAVED"
+                self.current_mapping_job["map_key"] = map_key
+                self.current_mapping_job["display_name"] = display_name
+                self.current_mapping_job["final_map_dir"] = final_map_dir
+                self.current_mapping_job["final_map_base"] = final_map_base
+                self.current_mapping_job["saved_at"] = datetime.now().isoformat()
+                self.save_current_job_metadata()
+
+                self.publish_log(f"Final map saved successfully: {final_map_base}")
+            else:
+                self.current_mapping_job["status"] = "FINAL_SAVE_FAILED"
+                self.current_mapping_job["map_key"] = map_key
+                self.current_mapping_job["display_name"] = display_name
+                self.save_current_job_metadata()
+
+                self.publish_log("Final map save failed.")
+        except Exception as e:
+            self.current_mapping_job["status"] = "FINAL_SAVE_FAILED"
+            self.current_mapping_job["map_key"] = map_key
+            self.current_mapping_job["display_name"] = display_name
+            self.save_current_job_metadata()
+            self.publish_log(f"Exception while saving final map: {e}")
+        finally:
+            self.send_stop_command()
+            self._stop_mapping_stack()
+            self.robot_state = ROBOT_WAITING
+            self.disconnect_time = None
+            self.current_mapping_job = None
 
     def create_mapping_job(self):
         """
@@ -942,6 +1007,14 @@ class AppCommandNode(Node):
             "status": "RUNNING",
             "created_at": datetime.now().isoformat()
         }
+
+    def sanitize_map_name(self, name: str) -> str:
+        """
+        Convert a display name into a filesystem-safe base name.
+        """
+        cleaned = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name.strip())
+        cleaned = cleaned.strip("_")
+        return cleaned or "map"
 ####################
 ####################
 #########################
