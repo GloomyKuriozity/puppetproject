@@ -2,7 +2,7 @@ import serial
 import time
 
 # Open port and force reset
-ser = serial.Serial('/dev/ttyUSB0', 9600)
+ser = serial.Serial('COM7', 200000)
 ser.setDTR(False)       # Disable DTR
 time.sleep(0.1)         # Wait briefly
 ser.setDTR(True)        # Enable DTR - this causes the Arduino to reset

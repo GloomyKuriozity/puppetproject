@@ -1,7 +1,7 @@
 '''
 Author: Mélanie Geulin
 
-Last Update: 23/04/2025
+Last Update: 22/06/2026
 
 Script: scan_from_lidar
 
@@ -160,15 +160,17 @@ class LidarPublisher(Node):
             if distances:
                 angle_distance_pairs = self.associate_with_angles(distances, start_angle, angular_res)
                 scan = LaserScan()
-                scan.header.stamp = start_time.to_msg()
-                scan.header.frame_id = 'base_scan'
 
                 num_ranges = len(distances)
+
+                scan.header.stamp = self.get_clock().now().to_msg()
+                scan.header.frame_id = 'base_scan'
+
                 scan.angle_min = start_angle
                 scan.angle_max = start_angle + angular_res * (len(distances) - 1)
                 scan.angle_increment = angular_res
-                scan.time_increment = 0.0  # Time between measurements
-                scan.scan_time = 0.0  # Total scan time
+                scan.scan_time = TIMER_PERIOD
+                scan.time_increment = TIMER_PERIOD / max(1, num_ranges)
                 scan.range_min = 0.05  # Minimum range
                 scan.range_max = 25.0  # Maximum range
 
@@ -186,7 +188,10 @@ class LidarPublisher(Node):
                 self.publisher_.publish(scan)
 
                 elapsed_time = (self.get_clock().now() - start_time).nanoseconds / 1e6
-                self.get_logger().info(f"Published scan with {len(scan.ranges)} points. Processing took {elapsed_time:.4f} seconds.")
+
+                self.get_logger().debug(
+                    f"Published scan with {len(scan.ranges)} points. Processing took {elapsed_time:.4f} ms."
+                )
 
             else:
                 # If reading data failed, try to reconnect

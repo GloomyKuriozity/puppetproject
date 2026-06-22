@@ -52,7 +52,7 @@ class CmdVelToCAN(Node):
         self.subscription = self.create_subscription(Twist, 'cmd_vel', self.cmd_vel_callback, cmd_vel_qos)
 
         ####TIMER####
-        self.timer = self.create_timer(0.33, self.timer_callback)
+        self.timer = self.create_timer(0.1, self.timer_callback)
         
         ####ODOM VARIABLES####
         self.br = TransformBroadcaster(self) 
@@ -62,6 +62,7 @@ class CmdVelToCAN(Node):
         self.prev_linear_vel = 0
         self.prev_angular_vel = 0
         self.last_odom_msg_time = None
+        self.last_robot_info_time = self.get_clock().now()
 
         ####VELOCITY VARIABLES####
         self.has_sent_stop = False
@@ -176,7 +177,7 @@ class CmdVelToCAN(Node):
 
         Retries with exponential backoff before raising the error.
         """
-        backoff = 1
+        backoff = 0.01
         for attempt in range(max_retries):
             try:
                 read = smbus2.i2c_msg.read(self.arduino_address_2, length)
@@ -187,7 +188,7 @@ class CmdVelToCAN(Node):
                 if attempt + 1 == max_retries:
                     raise
                 time.sleep(backoff)
-                backoff = min(backoff * 2, 32)
+                backoff = min(backoff * 2, 0.05)
 #########################
 
 #####VELOCITY FUNCTIONS#####          
@@ -266,7 +267,7 @@ class CmdVelToCAN(Node):
 
         self.br.sendTransform(t)
 
-        self.get_logger().info(
+        self.get_logger().debug(
             f"[TF] odom->base_link at x={x:.2f}, y={y:.2f}, theta(raw)={pose[2,0]:.3f}, yaw(used)={theta:.3f}"
         )
 #########################
@@ -403,7 +404,9 @@ class CmdVelToCAN(Node):
                 self.battery_voltage = float('nan')
 
             self.update_battery_state()
-            self.publish_robot_info()
+            if (now - self.last_robot_info_time).nanoseconds / 1e9 > 1.0:
+                self.publish_robot_info()
+                self.last_robot_info_time = now
 
             if (round(x, 4) == round(self.prev_x_pose, 4) and
                 round(y, 4) == round(self.prev_y_pose, 4) and
@@ -412,7 +415,7 @@ class CmdVelToCAN(Node):
                     self.get_logger().warn("Odometry data is unchanged from previous reading but robot is moving.")
                     return False
                 else:
-                    self.get_logger().warn("Odometry data is unchanged from previous reading but robot is NOT moving.")
+                    pass
 
             self.prev_x_pose = round(x, 4)
             self.prev_y_pose = round(y, 4)
