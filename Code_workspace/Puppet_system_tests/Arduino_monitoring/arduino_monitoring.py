@@ -2,7 +2,7 @@ import serial
 import time
 
 # Open port and force reset
-ser = serial.Serial('COM7', 200000)
+ser = serial.Serial('COM3', 115200)
 ser.setDTR(False)       # Disable DTR
 time.sleep(0.1)         # Wait briefly
 ser.setDTR(True)        # Enable DTR - this causes the Arduino to reset
