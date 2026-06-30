@@ -501,7 +501,7 @@ class AppCommandNode(Node):
         def home_sequence():
             # Start UP
             self._set_gpio_state(up=True, down=False)
-            time.sleep(8.0)
+            time.sleep(10.0)
             # Stop
             self._set_gpio_state(up=False, down=False)
             self.home_active = False
@@ -884,7 +884,14 @@ class AppCommandNode(Node):
             self.publish_log("Stopping mapping stack using pkill -f nav2 ...")
 
             result = subprocess.run(
-                ['pkill', '-f', 'slam'],
+                ['pkill', '-9', '-f', 'slam'],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False
+            )
+
+            result = subprocess.run(
+                ['pkill', '-9', '-f', 'nav2'],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 check=False

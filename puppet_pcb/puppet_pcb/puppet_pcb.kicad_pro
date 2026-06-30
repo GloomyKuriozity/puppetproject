@@ -524,7 +524,7 @@
     "last_paths": {
       "idf": "",
       "netlist": "",
-      "plot": "Nouveau dossier/",
+      "plot": "Gerbers/",
       "specctra_dsn": "puppet_pcb.dsn",
       "vrml": ""
     },
