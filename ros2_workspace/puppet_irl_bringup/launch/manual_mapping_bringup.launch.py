@@ -6,7 +6,6 @@ from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
     puppet_dir = get_package_share_directory('puppet_irl_bringup')
-    explore_dir = get_package_share_directory('explore_lite_IRL')
 
     slam_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource([

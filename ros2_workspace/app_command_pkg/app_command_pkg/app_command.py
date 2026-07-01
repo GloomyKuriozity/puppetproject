@@ -28,6 +28,24 @@ from std_msgs.msg import String, Float32MultiArray
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from robot_core.contamination.contamination_functions import (
+    ContaminationState,
+    probe_calibration,
+    measure_contamination,
+)
+from robot_core.utilities.utilities_functions import (
+    RobotUtilityState,
+    start_record_measures,
+    stop_record_measures,
+    get_current_pose,
+    associate_flag_pose,
+)
+from robot_core.navigation.navigation_functions import (
+    localize,
+    dock,
+    undock,
+    go_to,
+)
 
 HEARTBEAT_INTERVAL = 1.0            # Interval in seconds to expect/receive heartbeat
 
@@ -144,6 +162,16 @@ class AppCommandNode(Node):
         # Contamination info variables
         self.data_stream_enabled = False
 
+        self.contamination_state = ContaminationState()
+        self.latest_contamination_sample = None
+        self.latest_contamination_sample_time = None
+        self.contamination_measurement_thread = None
+        self.contamination_measurement_stop_requested = False
+
+        self.utility_state = RobotUtilityState()
+
+        self.navigation_process = None
+
         # GPIO / probe control info variables
         self.start_time = time.time()
         self.PROBE_ARM_DELAY_S = 2.0
@@ -249,6 +277,12 @@ class AppCommandNode(Node):
 
         try:
             alpha_cps, beta_gamma_cps = msg.data
+            self.latest_contamination_sample = {
+                "alpha_cps": float(alpha_cps),
+                "beta_gamma_cps": float(beta_gamma_cps),
+            }
+
+            self.latest_contamination_sample_time = time.time()
         except ValueError:
             self.get_logger().warn(f"Unexpected contamination array length: {len(msg.data)}")
             return
@@ -410,6 +444,154 @@ class AppCommandNode(Node):
             twist.linear.x = linear
             twist.angular.z = angular
             self.cmd_vel_publisher.publish(twist)
+
+    def localize_with_nav2(self, x, y, angle, map_name):
+        self.publish_log(
+            f"TODO localize_with_nav2: x={x}, y={y}, angle={angle}, map={map_name}"
+        )
+        return False
+
+
+    def navigate_with_nav2(self, x, y, yaw, map_name):
+        self.publish_log(
+            f"TODO navigate_with_nav2: x={x}, y={y}, yaw={yaw}, map={map_name}"
+        )
+        return False
+
+
+    def run_reverse_shim_docking(self, x, y, angle, map_name):
+        self.publish_log(
+            f"TODO run_reverse_shim_docking: x={x}, y={y}, angle={angle}, map={map_name}"
+        )
+        return False
+####################
+
+#####HANDLES########
+    def handle_probe_calibration_command(self, duration_s=None):
+        def calibration_worker():
+            result = probe_calibration(
+                self.contamination_state,
+                self.get_latest_contamination_sample,
+                duration_s=duration_s
+            )
+
+            self.publish_log(f"Probe calibration result: {result}")
+            self.send_client_line(
+                f"PROBE_CALIBRATION_RESULT:{json.dumps(result)}")
+            
+        threading.Thread(target=calibration_worker, daemon=True).start()
+
+    def handle_measure_contamination_command(self, continuous=False, frame_time_s=None):
+        if self.contamination_measurement_thread is not None:
+            if self.contamination_measurement_thread.is_alive():
+                self.publish_log("Contamination measurement already running.")
+                return
+
+        self.contamination_measurement_stop_requested = False
+
+        def measurement_worker():
+            while not self.contamination_measurement_stop_requested:
+                result = measure_contamination(
+                    self.contamination_state,
+                    self.get_latest_contamination_sample,
+                    continuous=continuous,
+                    frame_time_s=frame_time_s,
+                )
+
+                self.publish_log(f"Contamination measurement result: {result}")
+
+                self.send_client_line(
+                    f"MEASURE_CONTAMINATION_RESULT:{json.dumps(result)}"
+                )
+
+                flag_result = result.get("flag_result")
+                if flag_result is not None:
+                    self.handle_contamination_flag_result(flag_result)
+
+                    pose = get_current_pose(self.get_latest_robot_pose)
+
+                    record_result = associate_flag_pose(
+                        self.utility_state,
+                        flag_result,
+                        pose
+                    )
+
+                    if record_result["success"]:
+                        self.publish_log(f"Contamination record added: {record_result['record_count']}")
+
+                if not continuous:
+                    break
+
+        self.contamination_measurement_thread = threading.Thread(
+            target=measurement_worker,
+            daemon=True
+        )
+        self.contamination_measurement_thread.start()
+
+    def handle_stop_contamination_measurement_command(self):
+        self.contamination_measurement_stop_requested = True
+        self.contamination_state.measurement_active = False
+        self.contamination_state.measurement_continuous = False
+        self.publish_log("Contamination measurement stop requested.")
+
+    def handle_contamination_flag_result(self, flag_result):
+        flag = flag_result.get("flag", "INVALID")
+
+        if flag == "RAS":
+            return
+
+        self.publish_log(f"Contamination flag detected: {flag_result}")    
+        self.send_client_line(
+            f"MEASURE_CONTAMINATION_RESULT:{json.dumps(result)}"
+        )
+
+    def handle_localize_command(self, x, y, angle, map_name):
+        result = localize(
+            x, y, angle, map_name,
+            self.localize_with_nav2
+        )
+        self.publish_log(f"Localization result: {result}")
+        self.send_client_line(f"LOCALIZE_RESULT:{int(result)}")
+
+    def handle_go_to_command(self, x, y, map_name):
+        result = go_to(
+            x, y, map_name,
+            self.navigate_with_nav2
+        )
+        self.publish_log(f"Go-to result: {result}")
+        self.send_client_line(f"GO_TO_RESULT:{int(result)}")
+
+    def handle_undock_command(self, x, y, angle, map_name):
+        result = undock(
+            x, y, angle, map_name,
+            self.navigate_with_nav2
+        )
+        self.publish_log(f"Undock result: {result}")
+        self.send_client_line(f"UNDOCK_RESULT:{int(result)}")
+
+    def handle_dock_command(self, x, y, angle, map_name):
+        result = dock(
+            x, y, angle, map_name,
+            self.navigate_with_nav2,
+            self.run_reverse_shim_docking
+        )
+        self.publish_log(f"Dock result: {result}")
+        self.send_client_line(f"DOCK_RESULT:{int(result)}")
+
+    def handle_start_record_measures_command(self):
+        result = start_record_measures(self.utility_state)
+        self.publish_log(f"Record measures result: {result}")
+        self.send_client_line(
+            f"START_RECORD_MEASURES_RESULT:{json.dumps(result)}"
+        )
+
+    def handle_stop_record_measures_command(self):
+        result = stop_record_measures(self.utility_state)
+        self.publish_log(f"Record measures result: {result}")
+        self.send_client_line(
+            f"STOP_RECORD_MEASURES_RESULT:{json.dumps(result)}"
+        )
+
 ####################
 
 #####OTHER FUNCTIONS#####
@@ -421,6 +603,43 @@ class AppCommandNode(Node):
         log_msg.data = message
         self.log_publisher.publish(log_msg)
         self.get_logger().info(message)
+
+    def send_client_line(self, line):
+        if self.connected and self.client_socket:
+            try:
+                self.client_socket.sendall((line + "\n").encode("utf-8"))
+            except Exception as e:
+                self.publish_log(f"Error sending client line: {e}")
+                self.disconnect_client()
+
+    def get_latest_contamination_sample(self):
+        if self.latest_contamination_sample is None:
+            return None
+
+        if self.latest_contamination_sample_time is None:
+            return None
+
+        if time.time() - self.latest_contamination_sample_time > 1.0:
+            return None
+
+        return self.latest_contamination_sample
+
+    def get_latest_robot_pose(self):
+        if self.latest_pose_x is None:
+            return None
+
+        if self.latest_pose_y is None:
+            return None
+
+        if self.latest_pose_yaw is None:
+            return None
+
+        return {
+            "x": self.latest_pose_x,
+            "y": self.latest_pose_y,
+            "yaw": self.latest_pose_yaw,
+        }
+#########################
 
 #####PROBE MOVE FUNCTIONS#####
     def _set_gpio_state(self, up: bool, down: bool):
@@ -683,8 +902,78 @@ class AppCommandNode(Node):
             case "DATA_STREAM_OFF":
                 self.data_stream_enabled = False
                 self.publish_log("Contamination stream disabled.")
+            case "PROBE_CALIBRATION":
+                self.handle_probe_calibration_command()
+            case _ if data.startswith("PROBE_CALIBRATION:"):
+                try:
+                    duration_s = float(data.split(":", 1)[1].replace(",", "."))
+                    self.handle_probe_calibration_command(duration_s)
+                except ValueError:
+                    self.publish_log(f"Invalid PROBE_CALIBRATION duration: {data}")
             case "STOP_PROBE":
                 self.handle_probe_stop_command()
+            case "MEASURE_CONTAMINATION":
+                self.handle_measure_contamination_command(
+                    continuous=False,
+                    frame_time_s=None
+                )
+            case _ if data.startswith("MEASURE_CONTAMINATION:"):
+                try:
+                    frame_time_s = float(data.split(":", 1)[1].replace(",", "."))
+                    self.handle_measure_contamination_command(
+                        continuous=False,
+                        frame_time_s=frame_time_s
+                    )
+                except ValueError:
+                    self.publish_log(f"Invalid MEASURE_CONTAMINATION duration: {data}")
+            case "MEASURE_CONTAMINATION_CONTINUOUS":
+                self.handle_measure_contamination_command(
+                    continuous=True,
+                    frame_time_s=None
+                )
+            case _ if data.startswith("MEASURE_CONTAMINATION_CONTINUOUS:"):
+                try:
+                    frame_time_s = float(data.split(":", 1)[1].replace(",", "."))
+                    self.handle_measure_contamination_command(
+                        continuous=True,
+                        frame_time_s=frame_time_s
+                    )
+                except ValueError:
+                    self.publish_log(f"Invalid MEASURE_CONTAMINATION_CONTINUOUS duration: {data}")
+            case "STOP_CONTAMINATION_MEASUREMENT":
+                self.handle_stop_contamination_measurement_command()
+            case _ if data.startswith("LOCALIZE:"):
+                try:
+                    payload = data.split(":", 1)[1]
+                    x, y, angle, map_name = [p.strip() for p in payload.split(";", 3)]
+                    self.handle_localize_command(float(x), float(y), float(angle), map_name)
+                except Exception:
+                    self.publish_log(f"Invalid LOCALIZE command: {data}")
+            case _ if data.startswith("GO_TO:"):
+                try:
+                    payload = data.split(":", 1)[1]
+                    x, y, map_name = [p.strip() for p in payload.split(";", 2)]
+                    self.handle_go_to_command(float(x), float(y), map_name)
+                except Exception:
+                    self.publish_log(f"Invalid GO_TO command: {data}")
+            case _ if data.startswith("UNDOCK:"):
+                try:
+                    payload = data.split(":", 1)[1]
+                    x, y, angle, map_name = [p.strip() for p in payload.split(";", 3)]
+                    self.handle_undock_command(float(x), float(y), float(angle), map_name)
+                except Exception:
+                    self.publish_log(f"Invalid UNDOCK command: {data}")
+            case _ if data.startswith("DOCK:"):
+                try:
+                    payload = data.split(":", 1)[1]
+                    x, y, angle, map_name = [p.strip() for p in payload.split(";", 3)]
+                    self.handle_dock_command(float(x), float(y), float(angle), map_name)
+                except Exception:
+                    self.publish_log(f"Invalid DOCK command: {data}")
+            case "START_RECORD_MEASURES":
+                self.handle_start_record_measures_command()
+            case "STOP_RECORD_MEASURES":
+                self.handle_stop_record_measures_command()
             case _ if self.looks_like_twist_command(data):
                 self.process_twist_command(data)
             case _:

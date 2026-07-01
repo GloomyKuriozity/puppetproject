@@ -30,13 +30,13 @@ def generate_launch_description():
             ),
             description='Full path to the Nav2 parameters file'
         ),
-#        Node(
-#            package='nav2_amcl',
-#            executable='amcl',
-#            name='amcl',
-#            output='screen',
-#           parameters=[params_file]
-#        ),
+       Node(
+           package='nav2_amcl',
+           executable='amcl',
+           name='amcl',
+           output='screen',
+          parameters=[params_file]
+       ),
         Node(
             package='nav2_controller',
             executable='controller_server',
@@ -72,13 +72,13 @@ def generate_launch_description():
             output='screen',
             parameters=[params_file]
         ),
- #       Node(
- #           package='nav2_map_server',
- #           executable='map_server',
- #           name='map_server',
- #           output='screen',
- #           parameters=[{'yaml_filename': map_yaml_file}, params_file]
- #       ),
+       Node(
+           package='nav2_map_server',
+           executable='map_server',
+           name='map_server',
+           output='screen',
+           parameters=[{'yaml_filename': map_yaml_file}, params_file]
+       ),
         Node(
             package='nav2_velocity_smoother',
             executable='velocity_smoother',
@@ -100,6 +100,8 @@ def generate_launch_description():
                 'use_sim_time': False,
                 'autostart': True,
                 'node_names': [
+                'map_server',
+                'amcl',
                 'controller_server',
                 'planner_server',
                 'behavior_server',
